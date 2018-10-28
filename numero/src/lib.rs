@@ -21,6 +21,12 @@ impl NumberService {
     }
 }
 
+impl Default for NumberService {
+    fn default() -> NumberService {
+        Self::new()
+    }
+}
+
 #[derive(Serialize, Deserialize)]
 pub enum Command {
     GiveMeANumber,
