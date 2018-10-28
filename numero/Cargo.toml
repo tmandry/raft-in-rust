@@ -2,5 +2,7 @@
 name = "numero"
 version = "0.1.0"
 authors = ["Tyler Mandry <tmandry@gmail.com>"]
+edition = "2018"
 
 [dependencies]
+raft = { path = "../raft" }
