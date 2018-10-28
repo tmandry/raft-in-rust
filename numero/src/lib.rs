@@ -1,4 +1,5 @@
 use raft::StateMachine;
+use serde_derive::{Deserialize, Serialize};
 
 struct NumberService {
     last: Option<u64>,
@@ -20,6 +21,7 @@ impl NumberService {
     }
 }
 
+#[derive(Serialize, Deserialize)]
 pub enum Command {
     GiveMeANumber,
     LastNumberIssued,

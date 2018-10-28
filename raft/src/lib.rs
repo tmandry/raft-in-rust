@@ -1,8 +1,10 @@
 #![allow(dead_code)]
 
+use serde::{de::DeserializeOwned, Serialize};
+
 pub trait StateMachine {
-    type Command;
-    type Response;
+    type Command: Serialize + DeserializeOwned;
+    type Response: Serialize + DeserializeOwned;
 
     fn apply(&mut self, command: &Self::Command) -> Self::Response;
 }
