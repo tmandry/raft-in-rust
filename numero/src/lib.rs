@@ -1,4 +1,4 @@
-use raft::{StateMachine};
+use raft::StateMachine;
 
 struct NumberService {
     last: Option<u64>,
@@ -7,15 +7,13 @@ struct NumberService {
 #[allow(dead_code)]
 impl NumberService {
     fn new() -> NumberService {
-        NumberService {
-            last: None,
-        }
+        NumberService { last: None }
     }
 
     fn next_number(&mut self) -> u64 {
         let next = match self.last {
             Some(last) => last + 1,
-            None       => 1,
+            None => 1,
         };
         self.last = Some(next);
         next
