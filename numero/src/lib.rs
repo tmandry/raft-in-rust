@@ -1,11 +1,10 @@
-#![allow(dead_code)]
-
 use raft::{StateMachine};
 
 struct NumberService {
     last: Option<u64>,
 }
 
+#[allow(dead_code)]
 impl NumberService {
     fn new() -> NumberService {
         NumberService {
@@ -23,17 +22,19 @@ impl NumberService {
     }
 }
 
-enum Command {
+pub enum Command {
     GiveMeANumber,
+    LastNumberIssued,
 }
 
 impl StateMachine for NumberService {
     type Command = Command;
-    type Response = u64;
+    type Response = Option<u64>;
 
     fn apply(&mut self, command: &Self::Command) -> Self::Response {
         match command {
-            Command::GiveMeANumber => self.next_number()
+            Command::GiveMeANumber => Some(self.next_number()),
+            Command::LastNumberIssued => self.last,
         }
     }
 }
@@ -43,10 +44,21 @@ mod tests {
     use super::*;
 
     #[test]
-    fn it_works() {
+    fn next_number() {
         let mut svc = NumberService::new();
         assert_eq!(1, svc.next_number());
         assert_eq!(2, svc.next_number());
         assert_eq!(3, svc.next_number());
+    }
+
+    #[test]
+    fn apply() {
+        let mut svc = NumberService::new();
+        assert_eq!(None, svc.apply(&Command::LastNumberIssued));
+        assert_eq!(Some(1), svc.apply(&Command::GiveMeANumber));
+        assert_eq!(Some(2), svc.apply(&Command::GiveMeANumber));
+        assert_eq!(Some(3), svc.apply(&Command::GiveMeANumber));
+        assert_eq!(Some(3), svc.apply(&Command::LastNumberIssued));
+        assert_eq!(Some(4), svc.apply(&Command::GiveMeANumber));
     }
 }
