@@ -350,4 +350,30 @@ mod tests {
         );
         assert_eq!(12, server.state.0);
     }
+
+    #[test]
+    fn append_entries_works_for_multiple_entries() {
+        let server = &mut valid_server();
+
+        try_append(
+            AppendEntries {
+                prev_log_index: None,
+                leader_commit: 1,
+                entries: vec![Increment, Increment, Increment],
+                ..valid_heartbeat()
+            },
+            server,
+        );
+        assert_eq!(1, server.state.0);
+
+        try_append(
+            AppendEntries {
+                prev_log_index: Some(3),
+                leader_commit: 3,
+                ..valid_heartbeat()
+            },
+            server,
+        );
+        assert_eq!(3, server.state.0);
+    }
 }
