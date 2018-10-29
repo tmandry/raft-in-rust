@@ -27,7 +27,7 @@ impl Default for NumberService {
     }
 }
 
-#[derive(Serialize, Deserialize)]
+#[derive(Serialize, Deserialize, Clone, Debug)]
 pub enum Command {
     GiveMeANumber,
     LastNumberIssued,
