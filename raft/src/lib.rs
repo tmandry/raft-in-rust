@@ -1,8 +1,16 @@
+extern crate jsonrpc_core;
+#[macro_use]
+extern crate jsonrpc_macros;
+extern crate serde;
+extern crate serde_derive;
+
 use serde::{de::DeserializeOwned, Serialize};
 use serde_derive::{Deserialize, Serialize};
 use std::cmp::min;
 use std::collections::BTreeMap;
 use std::fmt::Debug;
+
+pub mod election;
 
 pub trait StateMachine: Default {
     type Command: Serialize + DeserializeOwned + Clone + Debug;
