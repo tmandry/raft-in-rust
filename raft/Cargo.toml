@@ -2,11 +2,8 @@
 name = "raft"
 version = "0.1.0"
 authors = ["Tyler Mandry <tmandry@gmail.com>"]
-#edition = "2018"
+edition = "2018"
 
 [dependencies]
 serde = "1.0"
 serde_derive = "1.0"
-jsonrpc-core = "9.0.0"
-jsonrpc-http-server = "9.0.0"
-jsonrpc-macros = "9.0.0"
