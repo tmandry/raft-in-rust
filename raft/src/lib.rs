@@ -29,14 +29,32 @@ struct LogEntry<Entry> {
     entry: Entry,
 }
 
-#[allow(dead_code)]
-pub(crate) struct Server<S: StateMachine> {
+/// The entire state of a Raft instance.
+pub(crate) struct Raft<S: StateMachine> {
     /// The log of commands issued.
     log: Log<S::Command>,
 
     /// The current state, with all commands up to `last_applied` applied.
     state: S,
 
+    /// The generic state of the Raft server.
+    server: Server,
+}
+
+impl<S: StateMachine> Default for Raft<S> {
+    fn default() -> Raft<S> {
+        Raft {
+            log: Default::default(),
+            state: Default::default(),
+            server: Default::default(),
+        }
+    }
+}
+
+/// The generic Raft server state, i.e. everything that does not involve
+/// the StateMachine directly.
+#[allow(dead_code)]
+pub(crate) struct Server {
     /// What we think the current term is. Never goes down.
     current_term: Term,
 
@@ -68,12 +86,9 @@ struct AppendEntries<Command> {
     leader_commit: LogIndex,
 }
 
-#[allow(dead_code)]
-impl<S: StateMachine> Server<S> {
-    pub(crate) fn new() -> Server<S> {
+impl Default for Server {
+    fn default() -> Server {
         Server {
-            log: Default::default(),
-            state: Default::default(),
             current_term: 0,
             voted_for: None,
             last_commit: 0,
@@ -81,10 +96,23 @@ impl<S: StateMachine> Server<S> {
             leader_state: None,
         }
     }
+}
+
+impl Server {}
+
+#[allow(dead_code)]
+impl<S: StateMachine> Raft<S> {
+    pub(crate) fn new() -> Raft<S> {
+        Raft {
+            log: Default::default(),
+            state: Default::default(),
+            server: Default::default(),
+        }
+    }
 
     /// See [`AppendEntries`].
     pub(crate) fn append_entries(&mut self, request: AppendEntries<S::Command>) -> bool {
-        if request.term < self.current_term {
+        if request.term < self.server.current_term {
             return false;
         }
 
@@ -123,24 +151,25 @@ impl<S: StateMachine> Server<S> {
     }
 
     fn update_commit(&mut self, leader_commit: LogIndex) {
-        if self.last_commit >= leader_commit {
+        let srv = &mut self.server;
+        if srv.last_commit >= leader_commit {
             return;
         }
 
         // Update last commit.
         let last_key = *self.log.keys().last().unwrap_or(&0);
-        self.last_commit = min(leader_commit, last_key);
+        srv.last_commit = min(leader_commit, last_key);
 
         // Apply all entries up to and including the last commit.
-        if self.last_commit > self.last_applied {
+        if srv.last_commit > srv.last_applied {
             use std::ops::Bound::{Excluded, Included};
 
-            let apply_range = (Excluded(self.last_applied), Included(self.last_commit));
+            let apply_range = (Excluded(srv.last_applied), Included(srv.last_commit));
             for entry in self.log.range(apply_range) {
                 self.state.apply(&(entry.1).entry);
             }
 
-            self.last_applied = self.last_commit;
+            srv.last_applied = srv.last_commit;
         }
     }
 }
@@ -148,7 +177,7 @@ impl<S: StateMachine> Server<S> {
 type Error = ();
 
 #[allow(dead_code)]
-impl<S: StateMachine> Server<S> {
+impl<S: StateMachine> Raft<S> {
     fn handle_request(&mut self, _request: &S::Command) -> Result<S::Response, Error> {
         unimplemented!()
     }
@@ -193,10 +222,10 @@ mod tests {
 
     const START_TERM: Term = 2;
 
-    fn valid_server() -> Server<TestService> {
-        let mut server = Server::<TestService>::new();
-        server.current_term = START_TERM;
-        server
+    fn valid_raft() -> Raft<TestService> {
+        let mut raft: Raft<TestService> = Default::default();
+        raft.server.current_term = START_TERM;
+        raft
     }
 
     fn valid_heartbeat<C>() -> AppendEntries<C> {
@@ -212,14 +241,14 @@ mod tests {
 
     #[test]
     fn append_entries_succeeds_with_valid_request() {
-        assert_eq!(true, valid_server().append_entries(valid_heartbeat()));
+        assert_eq!(true, valid_raft().append_entries(valid_heartbeat()));
     }
 
     #[test]
     fn append_entries_fails_with_unknown_log_index() {
         assert_eq!(
             false,
-            valid_server().append_entries(AppendEntries {
+            valid_raft().append_entries(AppendEntries {
                 prev_log_index: Some(5),
                 ..valid_heartbeat()
             })
@@ -230,7 +259,7 @@ mod tests {
     fn append_entries_fails_with_old_term() {
         assert_eq!(
             false,
-            valid_server().append_entries(AppendEntries {
+            valid_raft().append_entries(AppendEntries {
                 term: 1,
                 ..valid_heartbeat()
             })
@@ -244,8 +273,8 @@ mod tests {
         }
     }
 
-    fn try_append(request: AppendEntries<Command>, server: &mut Server<TestService>) -> bool {
-        if !server.append_entries(request.clone()) {
+    fn try_append(request: AppendEntries<Command>, raft: &mut Raft<TestService>) -> bool {
+        if !raft.append_entries(request.clone()) {
             println!("Request failed: {:#?}", request);
             return false;
         }
@@ -254,10 +283,10 @@ mod tests {
 
     #[test]
     fn append_entries_appends_to_log_with_valid_request() {
-        let mut server = valid_server();
-        assert_eq!(0, server.log.len());
-        assert_eq!(true, server.append_entries(valid_append(Increment)));
-        assert_eq!(1, server.log.len());
+        let mut raft = valid_raft();
+        assert_eq!(0, raft.log.len());
+        assert_eq!(true, raft.append_entries(valid_append(Increment)));
+        assert_eq!(1, raft.log.len());
     }
 
     #[test]
@@ -265,39 +294,39 @@ mod tests {
         fn send_with_commit(
             leader_commit: LogIndex,
             request: AppendEntries<Command>,
-            server: &mut Server<TestService>,
+            raft: &mut Raft<TestService>,
         ) {
             try_append(
                 AppendEntries {
                     leader_commit,
-                    prev_log_index: server.log.keys().last().map(|x| *x),
+                    prev_log_index: raft.log.keys().last().map(|x| *x),
                     ..request
                 },
-                server,
+                raft,
             );
         }
 
-        let server = &mut valid_server();
+        let raft = &mut valid_raft();
 
-        send_with_commit(0, valid_append(Increment), server);
-        send_with_commit(0, valid_append(Increment), server);
+        send_with_commit(0, valid_append(Increment), raft);
+        send_with_commit(0, valid_append(Increment), raft);
 
         // No entries have been committed yet.
-        assert_eq!(0, server.state.0);
+        assert_eq!(0, raft.state.0);
 
-        send_with_commit(1, valid_append(Increment), server);
-        assert_eq!(1, server.state.0);
-        send_with_commit(1, valid_heartbeat(), server);
-        assert_eq!(1, server.state.0);
-        send_with_commit(2, valid_heartbeat(), server);
-        assert_eq!(2, server.state.0);
-        send_with_commit(4, valid_append(Increment), server);
-        assert_eq!(4, server.state.0);
+        send_with_commit(1, valid_append(Increment), raft);
+        assert_eq!(1, raft.state.0);
+        send_with_commit(1, valid_heartbeat(), raft);
+        assert_eq!(1, raft.state.0);
+        send_with_commit(2, valid_heartbeat(), raft);
+        assert_eq!(2, raft.state.0);
+        send_with_commit(4, valid_append(Increment), raft);
+        assert_eq!(4, raft.state.0);
     }
 
     #[test]
     fn append_entries_removes_conflicting_entries_from_old_leader() {
-        let server = &mut valid_server();
+        let raft = &mut valid_raft();
 
         for i in 0..8 {
             try_append(
@@ -307,7 +336,7 @@ mod tests {
                     prev_log_index: if i > 0 { Some(i) } else { None },
                     ..valid_append(Increment)
                 },
-                server,
+                raft,
             );
         }
 
@@ -319,9 +348,9 @@ mod tests {
                 prev_log_index: Some(8),
                 ..valid_heartbeat()
             },
-            server,
+            raft,
         );
-        assert_eq!(5, server.state.0);
+        assert_eq!(5, raft.state.0);
 
         // New leader comes up 2 terms later, but did not see the last two uncommitted
         // entries. It did see the first uncommitted entry 6, though (still uncommitted).
@@ -332,9 +361,9 @@ mod tests {
                 prev_log_index: Some(6),
                 ..valid_heartbeat()
             },
-            server,
+            raft,
         );
-        assert_eq!(5, server.state.0);
+        assert_eq!(5, raft.state.0);
 
         // New leader tells us about a new committed entry. At this point we can finally commit
         // entry 6 from the previous term, then apply entry 7 (a Double operation). This leaves us
@@ -346,14 +375,14 @@ mod tests {
                 prev_log_index: Some(6),
                 ..valid_append(Double)
             },
-            server,
+            raft,
         );
-        assert_eq!(12, server.state.0);
+        assert_eq!(12, raft.state.0);
     }
 
     #[test]
     fn append_entries_works_for_multiple_entries() {
-        let server = &mut valid_server();
+        let raft = &mut valid_raft();
 
         try_append(
             AppendEntries {
@@ -362,9 +391,9 @@ mod tests {
                 entries: vec![Increment, Increment, Increment],
                 ..valid_heartbeat()
             },
-            server,
+            raft,
         );
-        assert_eq!(1, server.state.0);
+        assert_eq!(1, raft.state.0);
 
         try_append(
             AppendEntries {
@@ -372,8 +401,8 @@ mod tests {
                 leader_commit: 3,
                 ..valid_heartbeat()
             },
-            server,
+            raft,
         );
-        assert_eq!(3, server.state.0);
+        assert_eq!(3, raft.state.0);
     }
 }
