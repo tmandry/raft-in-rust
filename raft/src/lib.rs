@@ -1,3 +1,5 @@
+mod protos;
+
 use serde::{de::DeserializeOwned, Serialize};
 use serde_derive::{Deserialize, Serialize};
 use std::cmp::min;
