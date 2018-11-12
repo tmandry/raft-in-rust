@@ -15,7 +15,7 @@ impl RaftService for Arc<Mutex<Server>> {
 
         // Introduce some artificial delay to make things more interesting.
         let delay = std::env::args().nth(1).unwrap().parse::<u64>().unwrap();
-        std::thread::sleep(std::time::Duration::from_millis(100 * delay));
+        std::thread::sleep(std::time::Duration::from_millis(10 * delay));
 
         let mut this = self.lock().unwrap();
 
@@ -97,15 +97,25 @@ impl RpcState {
         req.set_last_log_index(last_log.map(|x| *x.0).unwrap_or(0));
         req.set_last_log_term(last_log.map(|x| x.1.term).unwrap_or(0));
 
+        // Update current term and vote for ourselves.
+        raft.server
+            .lock()
+            .map(|mut server| {
+                server.voted_for = Some(self.id);
+                server.current_term += 1;
+            })
+            .unwrap();
+
         let votes_required = (self.clients.len() as i32 + 2) / 2;
         let votes_received: i32 = self
             .clients
             .values()
-            .map(|client| client.request_vote(&req))
+            .map(|client| client.request_vote(&req)) // FIXME async
             .filter_map(|resp| match resp {
                 Ok(reply) => {
                     raft.saw_term(reply.term);
                     if reply.vote_granted {
+                        debug!("Received vote");
                         Some(1)
                     } else {
                         None
