@@ -1,20 +1,25 @@
 use crate::protos::raft::{VoteRequest, VoteResponse};
-use crate::protos::raft_grpc::{RaftService, RaftServiceClient};
+use crate::protos::raft_grpc::{self, RaftService, RaftServiceClient};
+use crate::server::Config;
 use crate::{Raft, Server, ServerId, StateMachine};
 use futures::Future;
-use grpcio::{RpcContext, UnarySink};
+use grpcio::{self, ChannelBuilder, EnvBuilder, Environment, RpcContext, ServerBuilder, UnarySink};
 use std::collections::BTreeMap;
+use std::net::SocketAddr;
+use std::sync::{Arc, Mutex};
 
-impl RaftService for Server {
+impl RaftService for Arc<Mutex<Server>> {
     fn request_vote(&mut self, ctx: RpcContext, req: VoteRequest, sink: UnarySink<VoteResponse>) {
         println!("Got vote request from {}", req.get_candidate());
 
+        let mut this = self.lock().unwrap();
+
         let mut resp = VoteResponse::new();
-        resp.set_term(self.current_term);
-        let granted = match self.voted_for {
+        resp.set_term(this.current_term);
+        let granted = match this.voted_for {
             Some(_) => false,
             None => {
-                self.voted_for = Some(req.get_candidate());
+                this.voted_for = Some(req.get_candidate());
                 true
             }
         };
@@ -28,14 +33,59 @@ impl RaftService for Server {
 }
 
 pub struct RpcState {
-    pub id: ServerId,
-    pub clients: BTreeMap<ServerId, RaftServiceClient>,
+    id: ServerId,
+    clients: BTreeMap<ServerId, RaftServiceClient>,
+    #[allow(unused)]
+    server: grpcio::Server,
 }
 
 impl RpcState {
+    pub(crate) fn new(config: Config, server: Arc<Mutex<Server>>) -> Self {
+        let mut endpoints = config.endpoints;
+        let my_endpoint = endpoints
+            .remove(&config.id)
+            .expect("no server endpoint configured for my id!");
+
+        let env = Arc::new(EnvBuilder::new().build());
+        RpcState {
+            id: config.id,
+            clients: Self::connect(endpoints, env.clone()),
+            server: Self::create_server(my_endpoint, env, server),
+        }
+    }
+
+    fn connect(
+        endpoints: BTreeMap<ServerId, String>,
+        env: Arc<Environment>,
+    ) -> BTreeMap<ServerId, RaftServiceClient> {
+        let mut clients = BTreeMap::new();
+        for (id, endpoint) in endpoints {
+            let ch = ChannelBuilder::new(env.clone()).connect(&endpoint);
+            let client = RaftServiceClient::new(ch);
+            clients.insert(id, client);
+        }
+        clients
+    }
+
+    fn create_server(
+        endpoint: String,
+        env: Arc<Environment>,
+        server: Arc<Mutex<Server>>,
+    ) -> grpcio::Server {
+        let endpoint: SocketAddr = endpoint.parse().unwrap();
+        let service = raft_grpc::create_raft_service(server);
+        let mut server = ServerBuilder::new(env)
+            .register_service(service)
+            .bind(endpoint.ip().to_string(), endpoint.port())
+            .build()
+            .unwrap();
+        server.start();
+        server
+    }
+
     pub fn timeout<S: StateMachine>(&self, raft: &mut Raft<S>) {
         let mut req = VoteRequest::new();
-        req.set_term(raft.server.current_term);
+        req.set_term(raft.server.lock().unwrap().current_term);
         req.set_candidate(self.id);
 
         let last_log = raft.log.iter().next_back();

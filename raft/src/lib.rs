@@ -1,11 +1,13 @@
-pub(crate) mod protos;
 pub mod election;
+pub(crate) mod protos;
+pub mod server;
 
 use serde::{de::DeserializeOwned, Serialize};
 use serde_derive::{Deserialize, Serialize};
 use std::cmp::min;
 use std::collections::BTreeMap;
 use std::fmt::Debug;
+use std::sync::{Arc, Mutex};
 
 pub trait StateMachine: Default {
     type Command: Serialize + DeserializeOwned + Clone + Debug;
@@ -41,7 +43,7 @@ pub struct Raft<S: StateMachine> {
     state: S,
 
     /// The generic state of the Raft server.
-    server: Server,
+    server: Arc<Mutex<Server>>,
 }
 
 impl<S: StateMachine> Default for Raft<S> {
@@ -115,7 +117,7 @@ impl<S: StateMachine> Raft<S> {
 
     /// See [`AppendEntries`].
     pub(crate) fn append_entries(&mut self, request: AppendEntries<S::Command>) -> bool {
-        if request.term < self.server.current_term {
+        if request.term < self.server.lock().unwrap().current_term {
             return false;
         }
 
@@ -154,7 +156,7 @@ impl<S: StateMachine> Raft<S> {
     }
 
     fn update_commit(&mut self, leader_commit: LogIndex) {
-        let srv = &mut self.server;
+        let srv = &mut self.server.lock().unwrap();
         if srv.last_commit >= leader_commit {
             return;
         }
@@ -177,8 +179,9 @@ impl<S: StateMachine> Raft<S> {
     }
 
     fn saw_term(&mut self, term: Term) {
-        if term > self.server.current_term {
-            self.server.current_term = term;
+        let mut server = self.server.lock().unwrap();
+        if term > server.current_term {
+            server.current_term = term;
             // TODO convert to follower
         }
     }
