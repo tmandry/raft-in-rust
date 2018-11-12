@@ -1,2 +1,2 @@
-mod raft;
-mod raft_grpc;
+pub(crate) mod raft;
+pub(crate) mod raft_grpc;

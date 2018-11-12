@@ -1,4 +1,5 @@
-mod protos;
+pub(crate) mod protos;
+pub mod election;
 
 use serde::{de::DeserializeOwned, Serialize};
 use serde_derive::{Deserialize, Serialize};
@@ -13,9 +14,9 @@ pub trait StateMachine: Default {
     fn apply(&mut self, command: &Self::Command) -> Self::Response;
 }
 
-type ServerId = u16;
-type Term = u32;
-type LogIndex = u64;
+type ServerId = i32;
+type Term = i32;
+type LogIndex = i64;
 
 /// The log. This is persisted by each server.
 ///
@@ -32,7 +33,7 @@ struct LogEntry<Entry> {
 }
 
 /// The entire state of a Raft instance.
-pub(crate) struct Raft<S: StateMachine> {
+pub struct Raft<S: StateMachine> {
     /// The log of commands issued.
     log: Log<S::Command>,
 
@@ -172,6 +173,13 @@ impl<S: StateMachine> Raft<S> {
             }
 
             srv.last_applied = srv.last_commit;
+        }
+    }
+
+    fn saw_term(&mut self, term: Term) {
+        if term > self.server.current_term {
+            self.server.current_term = term;
+            // TODO convert to follower
         }
     }
 }
