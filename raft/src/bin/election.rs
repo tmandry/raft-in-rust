@@ -50,7 +50,7 @@ fn main() -> std::io::Result<()> {
     let config = Config::new(File::open("servers.txt")?, id);
     let mut server: RaftServer<sm::TestService> = RaftServer::new(config);
 
-    sleep(Duration::new(id as u64 + 2, 0));
+    sleep(Duration::from_millis((id as u64 + 2) * 100));
     server.rpc.timeout(&mut server.raft);
     Ok(())
 }

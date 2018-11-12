@@ -12,6 +12,10 @@ impl RaftService for Arc<Mutex<Server>> {
     fn request_vote(&mut self, ctx: RpcContext, req: VoteRequest, sink: UnarySink<VoteResponse>) {
         println!("Got vote request from {}", req.get_candidate());
 
+        // Introduce some artificial delay to make things more interesting.
+        let delay = std::env::args().nth(1).unwrap().parse::<u64>().unwrap();
+        std::thread::sleep(std::time::Duration::from_millis(100 * delay));
+
         let mut this = self.lock().unwrap();
 
         let mut resp = VoteResponse::new();
@@ -92,25 +96,32 @@ impl RpcState {
         req.set_last_log_index(last_log.map(|x| *x.0).unwrap_or(0));
         req.set_last_log_term(last_log.map(|x| x.1.term).unwrap_or(0));
 
+        let votes_required = (self.clients.len() as i32 + 2) / 2;
         let votes_received: i32 = self
             .clients
             .values()
             .map(|client| client.request_vote(&req))
-            .map(|resp| match resp {
+            .filter_map(|resp| match resp {
                 Ok(reply) => {
                     raft.saw_term(reply.term);
                     if reply.vote_granted {
-                        1
+                        Some(1)
                     } else {
-                        0
+                        None
                     }
                 }
                 Err(e) => {
                     println!("Error received during vote request: {:?}", e);
-                    0
+                    None
                 }
             })
+            .take(votes_required as usize)
             .sum();
-        println!("Received {} votes!", votes_received);
+
+        if votes_received >= votes_required {
+            println!("Received {} votes and elected!", votes_received);
+        } else {
+            println!("Received {} votes, not elected.", votes_received);
+        }
     }
 }
