@@ -4,13 +4,14 @@ use crate::server::Config;
 use crate::{Raft, Server, ServerId, StateMachine};
 use futures::Future;
 use grpcio::{self, ChannelBuilder, EnvBuilder, Environment, RpcContext, ServerBuilder, UnarySink};
+use log::{debug, error, info, warn};
 use std::collections::BTreeMap;
 use std::net::SocketAddr;
 use std::sync::{Arc, Mutex};
 
 impl RaftService for Arc<Mutex<Server>> {
     fn request_vote(&mut self, ctx: RpcContext, req: VoteRequest, sink: UnarySink<VoteResponse>) {
-        println!("Got vote request from {}", req.get_candidate());
+        info!("Got vote request from {}", req.get_candidate());
 
         // Introduce some artificial delay to make things more interesting.
         let delay = std::env::args().nth(1).unwrap().parse::<u64>().unwrap();
@@ -31,7 +32,7 @@ impl RaftService for Arc<Mutex<Server>> {
 
         let f = sink
             .success(resp)
-            .map_err(move |e| println!("Failed to reply to {:?}: {:?}", req, e));
+            .map_err(move |e| warn!("Failed to reply to {:?}: {:?}", req, e));
         ctx.spawn(f)
     }
 }
@@ -111,7 +112,7 @@ impl RpcState {
                     }
                 }
                 Err(e) => {
-                    println!("Error received during vote request: {:?}", e);
+                    error!("Error received during vote request: {:?}", e);
                     None
                 }
             })
@@ -119,9 +120,9 @@ impl RpcState {
             .sum();
 
         if votes_received >= votes_required {
-            println!("Received {} votes and elected!", votes_received);
+            info!("Received {} votes and elected!", votes_received);
         } else {
-            println!("Received {} votes, not elected.", votes_received);
+            info!("Received {} votes, not elected.", votes_received);
         }
     }
 }

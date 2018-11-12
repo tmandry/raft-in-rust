@@ -42,6 +42,10 @@ mod sm {
 }
 
 fn main() -> std::io::Result<()> {
+    env_logger::Builder::from_default_env()
+        .default_format_timestamp_nanos(true)
+        .init();
+
     let id = env::args()
         .nth(1)
         .expect("please supply server id in args")
