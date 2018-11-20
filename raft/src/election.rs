@@ -93,9 +93,9 @@ impl RpcState {
         req.set_term(raft.server.lock().unwrap().current_term);
         req.set_candidate(self.id);
 
-        let last_log = raft.log.iter().next_back();
-        req.set_last_log_index(last_log.map(|x| *x.0).unwrap_or(0));
-        req.set_last_log_term(last_log.map(|x| x.1.term).unwrap_or(0));
+        let storage = raft.storage.borrow();
+        req.set_last_log_index(storage.last_log_index());
+        req.set_last_log_term(storage.last_log_term());
 
         // Update current term and vote for ourselves.
         raft.server
@@ -113,7 +113,7 @@ impl RpcState {
             .map(|client| client.request_vote(&req)) // FIXME async
             .filter_map(|resp| match resp {
                 Ok(reply) => {
-                    raft.saw_term(reply.term);
+                    raft.server.lock().unwrap().saw_term(reply.term);
                     if reply.vote_granted {
                         debug!("Received vote");
                         Some(1)

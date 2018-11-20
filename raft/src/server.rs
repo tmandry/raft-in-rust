@@ -32,7 +32,7 @@ pub struct RaftServer<S: StateMachine> {
     pub raft: Raft<S>,
 }
 
-impl<S: StateMachine> RaftServer<S> {
+impl<S: StateMachine + 'static> RaftServer<S> {
     pub fn new(config: Config) -> Self {
         let raft: Raft<S> = Default::default();
         RaftServer {

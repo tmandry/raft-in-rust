@@ -1,13 +1,16 @@
 pub mod election;
 pub(crate) mod protos;
 pub mod server;
+pub mod storage;
 
+use crate::storage::{MemoryStorage, Storage};
 use serde::{de::DeserializeOwned, Serialize};
 use serde_derive::{Deserialize, Serialize};
 use std::cmp::min;
-use std::collections::BTreeMap;
 use std::fmt::Debug;
 use std::sync::{Arc, Mutex};
+use std::rc::Rc;
+use std::cell::RefCell;
 
 pub trait StateMachine: Default {
     type Command: Serialize + DeserializeOwned + Clone + Debug;
@@ -20,38 +23,19 @@ type ServerId = i32;
 type Term = i32;
 type LogIndex = i64;
 
-/// The log. This is persisted by each server.
-///
-/// It contains the term of each entry in order to ensure consistency in the
-/// case of leader failure with uncommitted logs.
-///
-/// Committed logs don't need this - we can optimize later.
-type Log<Entry> = BTreeMap<LogIndex, LogEntry<Entry>>;
-
-#[derive(Debug)]
-struct LogEntry<Entry> {
-    term: Term,
-    entry: Entry,
-}
-
 /// The entire state of a Raft instance.
 pub struct Raft<S: StateMachine> {
-    /// The log of commands issued.
-    log: Log<S::Command>,
-
-    /// The current state, with all commands up to `last_applied` applied.
-    state: S,
-
     /// The generic state of the Raft server.
     server: Arc<Mutex<Server>>,
+
+    storage: Rc<RefCell<dyn Storage<S>>>,
 }
 
-impl<S: StateMachine> Default for Raft<S> {
+impl<S: StateMachine + 'static> Default for Raft<S> {
     fn default() -> Raft<S> {
         Raft {
-            log: Default::default(),
-            state: Default::default(),
             server: Default::default(),
+            storage: Rc::new(RefCell::new(MemoryStorage::default())),
         }
     }
 }
@@ -69,9 +53,6 @@ pub(crate) struct Server {
     /// The index of the last known committed log.
     last_commit: LogIndex,
 
-    /// The index of the last log applied by us to our state.
-    last_applied: LogIndex,
-
     /// If we are the leader, this contains our leader state.
     leader_state: Option<Leader>,
 }
@@ -82,7 +63,6 @@ impl Default for Server {
             current_term: 0,
             voted_for: None,
             last_commit: 0,
-            last_applied: 0,
             leader_state: None,
         }
     }
@@ -122,12 +102,15 @@ pub(crate) struct VoteRequest {
 }
 
 #[allow(dead_code)]
-impl<S: StateMachine> Raft<S> {
+impl<S: StateMachine + 'static> Raft<S> {
     pub(crate) fn new() -> Raft<S> {
+        Default::default()
+    }
+
+    pub(crate) fn with_storage(storage: Rc<RefCell<dyn Storage<S>>>) -> Raft<S> {
         Raft {
-            log: Default::default(),
-            state: Default::default(),
             server: Default::default(),
+            storage
         }
     }
 
@@ -136,15 +119,19 @@ impl<S: StateMachine> Raft<S> {
         if request.term < self.server.lock().unwrap().current_term {
             return false;
         }
-        self.saw_term(request.term);
+        self.server.lock().unwrap().saw_term(request.term);
 
         if let Some(prev_log_index) = request.prev_log_index {
-            if !self.has_entry(prev_log_index, request.prev_log_term) {
+            if !self
+                .storage
+                .borrow()
+                .has_entry(prev_log_index, request.prev_log_term)
+            {
                 return false;
             }
         }
 
-        self.do_append(
+        self.storage.borrow_mut().append(
             request.entries,
             request.prev_log_index.unwrap_or(0) + 1,
             request.term,
@@ -163,9 +150,9 @@ impl<S: StateMachine> Raft<S> {
         }
         server.saw_term(req.term);
 
-        if server.voted_for.is_some() ||
-           req.last_log_term < self.last_log_term() ||
-           req.last_log_index < server.last_commit
+        if server.voted_for.is_some()
+            || req.last_log_term < self.storage.borrow().last_log_term()
+            || req.last_log_index < server.last_commit
         {
             return (current_term, false);
         }
@@ -176,51 +163,20 @@ impl<S: StateMachine> Raft<S> {
         return (current_term, true);
     }
 
-    fn has_entry(&self, log_index: LogIndex, log_term: Term) -> bool {
-        match self.log.get(&log_index) {
-            None => false,
-            Some(LogEntry { term, .. }) => *term == log_term,
-        }
-    }
-
-    fn last_log_term(&self) -> Term {
-        self.log.values().next_back().map(|x| x.term).unwrap_or(0)
-    }
-
-    fn do_append(&mut self, entries: Vec<S::Command>, start_index: LogIndex, term: Term) {
-        // Remove everything that might conflict.
-        self.log.split_off(&start_index);
-
-        let mut index = start_index;
-        for entry in entries.into_iter() {
-            self.log.insert(index, LogEntry { term, entry });
-            index += 1;
-        }
-    }
-
     fn update_commit(&mut self, leader_commit: LogIndex) {
         let srv = &mut self.server.lock().unwrap();
         if srv.last_commit >= leader_commit {
             return;
         }
 
+        let mut storage = self.storage.borrow_mut();
+
         // Update last commit.
-        let last_key = *self.log.keys().last().unwrap_or(&0);
-        srv.last_commit = min(leader_commit, last_key);
+        srv.last_commit = min(leader_commit, storage.last_log_index());
 
         // Apply all entries up to and including the last commit.
-        if srv.last_commit > srv.last_applied {
-            use std::ops::Bound::{Excluded, Included};
-
-            let apply_range = (Excluded(srv.last_applied), Included(srv.last_commit));
-            for entry in self.log.range(apply_range) {
-                self.state.apply(&(entry.1).entry);
-            }
-
-            srv.last_applied = srv.last_commit;
-        }
+        storage.apply_up_to(srv.last_commit);
     }
-
 }
 
 type Error = ();
@@ -235,6 +191,7 @@ impl<S: StateMachine> Raft<S> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::rc::Rc;
 
     struct TestService(i64);
 
@@ -271,10 +228,11 @@ mod tests {
 
     const START_TERM: Term = 2;
 
-    fn valid_raft() -> Raft<TestService> {
-        let mut raft: Raft<TestService> = Default::default();
-        raft.server.current_term = START_TERM;
-        raft
+    fn valid_raft() -> (Raft<TestService>, Rc<RefCell<MemoryStorage<TestService>>>) {
+        let storage = Rc::new(RefCell::new(MemoryStorage::<TestService>::default()));
+        let raft: Raft<TestService> = Raft::with_storage(storage.clone());
+        raft.server.lock().unwrap().current_term = START_TERM;
+        (raft, storage)
     }
 
     fn valid_heartbeat<C>() -> AppendEntries<C> {
@@ -290,14 +248,16 @@ mod tests {
 
     #[test]
     fn append_entries_succeeds_with_valid_request() {
-        assert_eq!(true, valid_raft().append_entries(valid_heartbeat()));
+        let (mut raft, _) = valid_raft();
+        assert_eq!(true, raft.append_entries(valid_heartbeat()));
     }
 
     #[test]
     fn append_entries_fails_with_unknown_log_index() {
+        let (mut raft, _) = valid_raft();
         assert_eq!(
             false,
-            valid_raft().append_entries(AppendEntries {
+            raft.append_entries(AppendEntries {
                 prev_log_index: Some(5),
                 ..valid_heartbeat()
             })
@@ -306,9 +266,10 @@ mod tests {
 
     #[test]
     fn append_entries_fails_with_old_term() {
+        let (mut raft, _) = valid_raft();
         assert_eq!(
             false,
-            valid_raft().append_entries(AppendEntries {
+            raft.append_entries(AppendEntries {
                 term: 1,
                 ..valid_heartbeat()
             })
@@ -332,10 +293,10 @@ mod tests {
 
     #[test]
     fn append_entries_appends_to_log_with_valid_request() {
-        let mut raft = valid_raft();
-        assert_eq!(0, raft.log.len());
+        let (mut raft, storage) = valid_raft();
+        assert_eq!(0, storage.borrow().len());
         assert_eq!(true, raft.append_entries(valid_append(Increment)));
-        assert_eq!(1, raft.log.len());
+        assert_eq!(1, storage.borrow().len());
     }
 
     #[test]
@@ -344,38 +305,44 @@ mod tests {
             leader_commit: LogIndex,
             request: AppendEntries<Command>,
             raft: &mut Raft<TestService>,
+            storage: &mut Rc<RefCell<MemoryStorage<TestService>>>,
         ) {
+            let last_log_index = storage.borrow().last_log_index();
+            let last_log_index = match last_log_index {
+                0 => None,
+                _ => Some(last_log_index),
+            };
             try_append(
                 AppendEntries {
                     leader_commit,
-                    prev_log_index: raft.log.keys().last().map(|x| *x),
+                    prev_log_index: last_log_index,
                     ..request
                 },
                 raft,
             );
         }
 
-        let raft = &mut valid_raft();
+        let (ref mut raft, ref mut storage) = valid_raft();
 
-        send_with_commit(0, valid_append(Increment), raft);
-        send_with_commit(0, valid_append(Increment), raft);
+        send_with_commit(0, valid_append(Increment), raft, storage);
+        send_with_commit(0, valid_append(Increment), raft, storage);
 
         // No entries have been committed yet.
-        assert_eq!(0, raft.state.0);
+        assert_eq!(0, storage.borrow().state.0);
 
-        send_with_commit(1, valid_append(Increment), raft);
-        assert_eq!(1, raft.state.0);
-        send_with_commit(1, valid_heartbeat(), raft);
-        assert_eq!(1, raft.state.0);
-        send_with_commit(2, valid_heartbeat(), raft);
-        assert_eq!(2, raft.state.0);
-        send_with_commit(4, valid_append(Increment), raft);
-        assert_eq!(4, raft.state.0);
+        send_with_commit(1, valid_append(Increment), raft, storage);
+        assert_eq!(1, storage.borrow().state.0);
+        send_with_commit(1, valid_heartbeat(), raft, storage);
+        assert_eq!(1, storage.borrow().state.0);
+        send_with_commit(2, valid_heartbeat(), raft, storage);
+        assert_eq!(2, storage.borrow().state.0);
+        send_with_commit(4, valid_append(Increment), raft, storage);
+        assert_eq!(4, storage.borrow().state.0);
     }
 
     #[test]
     fn append_entries_removes_conflicting_entries_from_old_leader() {
-        let raft = &mut valid_raft();
+        let (ref mut raft, ref mut storage) = valid_raft();
 
         for i in 0..8 {
             try_append(
@@ -399,7 +366,7 @@ mod tests {
             },
             raft,
         );
-        assert_eq!(5, raft.state.0);
+        assert_eq!(5, storage.borrow().state.0);
 
         // New leader comes up 2 terms later, but did not see the last two uncommitted
         // entries. It did see the first uncommitted entry 6, though (still uncommitted).
@@ -412,7 +379,7 @@ mod tests {
             },
             raft,
         );
-        assert_eq!(5, raft.state.0);
+        assert_eq!(5, storage.borrow().state.0);
 
         // New leader tells us about a new committed entry. At this point we can finally commit
         // entry 6 from the previous term, then apply entry 7 (a Double operation). This leaves us
@@ -426,12 +393,12 @@ mod tests {
             },
             raft,
         );
-        assert_eq!(12, raft.state.0);
+        assert_eq!(12, storage.borrow().state.0);
     }
 
     #[test]
     fn append_entries_works_for_multiple_entries() {
-        let raft = &mut valid_raft();
+        let (ref mut raft, ref mut storage) = valid_raft();
 
         try_append(
             AppendEntries {
@@ -442,7 +409,7 @@ mod tests {
             },
             raft,
         );
-        assert_eq!(1, raft.state.0);
+        assert_eq!(1, storage.borrow().state.0);
 
         try_append(
             AppendEntries {
@@ -452,6 +419,6 @@ mod tests {
             },
             raft,
         );
-        assert_eq!(3, raft.state.0);
+        assert_eq!(3, storage.borrow().state.0);
     }
 }
