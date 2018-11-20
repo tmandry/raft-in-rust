@@ -76,21 +76,6 @@ pub(crate) struct Server {
     leader_state: Option<Leader>,
 }
 
-struct Leader;
-
-/// AppendEntries RPC, invoked by leader to replicate log entries.
-///
-/// Also used as heartbeat (with `entries` empty.)
-#[derive(Serialize, Deserialize, Clone, Debug)]
-struct AppendEntries<Command> {
-    term: Term,
-    leader_id: ServerId,
-    prev_log_index: Option<LogIndex>,
-    prev_log_term: Term,
-    entries: Vec<Command>,
-    leader_commit: LogIndex,
-}
-
 impl Default for Server {
     fn default() -> Server {
         Server {
@@ -103,7 +88,38 @@ impl Default for Server {
     }
 }
 
-impl Server {}
+impl Server {
+    fn saw_term(&mut self, term: Term) {
+        if term > self.current_term {
+            // TODO convert to follower
+            // TODO save current_term to persistent storage
+            self.current_term = term;
+            self.voted_for = None;
+        }
+    }
+}
+
+struct Leader;
+
+/// AppendEntries RPC, invoked by leader to replicate log entries.
+///
+/// Also used as heartbeat (with `entries` empty.)
+#[derive(Serialize, Deserialize, Clone, Debug)]
+pub(crate) struct AppendEntries<Command> {
+    term: Term,
+    leader_id: ServerId,
+    prev_log_index: Option<LogIndex>,
+    prev_log_term: Term,
+    entries: Vec<Command>,
+    leader_commit: LogIndex,
+}
+
+pub(crate) struct VoteRequest {
+    term: Term,
+    candidate_id: ServerId,
+    last_log_index: LogIndex,
+    last_log_term: Term,
+}
 
 #[allow(dead_code)]
 impl<S: StateMachine> Raft<S> {
@@ -120,6 +136,7 @@ impl<S: StateMachine> Raft<S> {
         if request.term < self.server.lock().unwrap().current_term {
             return false;
         }
+        self.saw_term(request.term);
 
         if let Some(prev_log_index) = request.prev_log_index {
             if !self.has_entry(prev_log_index, request.prev_log_term) {
@@ -137,11 +154,37 @@ impl<S: StateMachine> Raft<S> {
         true
     }
 
+    pub(crate) fn request_vote(&mut self, req: &VoteRequest) -> (Term, bool) {
+        let mut server = self.server.lock().unwrap();
+        let current_term = server.current_term;
+
+        if req.term < current_term {
+            return (current_term, false);
+        }
+        server.saw_term(req.term);
+
+        if server.voted_for.is_some() ||
+           req.last_log_term < self.last_log_term() ||
+           req.last_log_index < server.last_commit
+        {
+            return (current_term, false);
+        }
+
+        // TODO persist on stable storage before responding
+        server.voted_for = Some(req.candidate_id);
+
+        return (current_term, true);
+    }
+
     fn has_entry(&self, log_index: LogIndex, log_term: Term) -> bool {
         match self.log.get(&log_index) {
             None => false,
             Some(LogEntry { term, .. }) => *term == log_term,
         }
+    }
+
+    fn last_log_term(&self) -> Term {
+        self.log.values().next_back().map(|x| x.term).unwrap_or(0)
     }
 
     fn do_append(&mut self, entries: Vec<S::Command>, start_index: LogIndex, term: Term) {
@@ -178,13 +221,6 @@ impl<S: StateMachine> Raft<S> {
         }
     }
 
-    fn saw_term(&mut self, term: Term) {
-        let mut server = self.server.lock().unwrap();
-        if term > server.current_term {
-            server.current_term = term;
-            // TODO convert to follower
-        }
-    }
 }
 
 type Error = ();
