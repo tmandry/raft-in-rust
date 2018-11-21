@@ -18,7 +18,7 @@ if [[ ! -f "$GRPC_HEADER" ]] ; then
     git clone -b v$GRPC_VERSION https://github.com/grpc/grpc &&
     cd grpc &&
     git submodule update --init &&
-    env prefix=$HOME/.cache make install_c
+    env prefix=$HOME/.cache make -j2 install_c install-grpc-cli
   );
 fi
 export CPLUS_INCLUDE_PATH="$HOME/.cache/include"
