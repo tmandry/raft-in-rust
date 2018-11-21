@@ -1,8 +1,11 @@
 use crate::election::RpcState;
 use crate::{Raft, ServerId, StateMachine};
+use crate::storage::MemoryStorage;
 use std::collections::BTreeMap;
 use std::fs::File;
 use std::io::{BufRead, BufReader};
+use std::rc::Rc;
+use std::cell::RefCell;
 
 #[derive(Clone, Debug)]
 pub struct Config {
@@ -29,15 +32,18 @@ impl Config {
 
 pub struct RaftServer<S: StateMachine> {
     pub rpc: RpcState,
-    pub raft: Raft<S>,
+    pub raft: Raft,
+    pub storage: Rc<RefCell<MemoryStorage<S>>>,
 }
 
 impl<S: StateMachine + 'static> RaftServer<S> {
     pub fn new(config: Config) -> Self {
-        let raft: Raft<S> = Default::default();
+        let storage = Rc::new(RefCell::new(MemoryStorage::default()));
+        let raft: Raft = Raft::new(storage.clone());
         RaftServer {
             rpc: RpcState::new(config, raft.server.clone()),
             raft,
+            storage,
         }
     }
 }

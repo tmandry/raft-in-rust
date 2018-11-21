@@ -3,7 +3,7 @@ pub(crate) mod protos;
 pub mod server;
 pub mod storage;
 
-use crate::storage::{MemoryStorage, Storage};
+use crate::storage::Storage;
 use serde::{de::DeserializeOwned, Serialize};
 use serde_derive::{Deserialize, Serialize};
 use std::cmp::min;
@@ -24,20 +24,11 @@ type Term = i32;
 type LogIndex = i64;
 
 /// The entire state of a Raft instance.
-pub struct Raft<S: StateMachine> {
+pub struct Raft {
     /// The generic state of the Raft server.
     server: Arc<Mutex<Server>>,
 
-    storage: Rc<RefCell<dyn Storage<S>>>,
-}
-
-impl<S: StateMachine + 'static> Default for Raft<S> {
-    fn default() -> Raft<S> {
-        Raft {
-            server: Default::default(),
-            storage: Rc::new(RefCell::new(MemoryStorage::default())),
-        }
-    }
+    storage: Rc<RefCell<dyn Storage>>,
 }
 
 /// The generic Raft server state, i.e. everything that does not involve
@@ -85,12 +76,12 @@ struct Leader;
 ///
 /// Also used as heartbeat (with `entries` empty.)
 #[derive(Serialize, Deserialize, Clone, Debug)]
-pub(crate) struct AppendEntries<Command> {
+pub(crate) struct AppendEntries {
     term: Term,
     leader_id: ServerId,
     prev_log_index: Option<LogIndex>,
     prev_log_term: Term,
-    entries: Vec<Command>,
+    entries: Vec<Vec<u8>>,
     leader_commit: LogIndex,
 }
 
@@ -102,12 +93,8 @@ pub(crate) struct VoteRequest {
 }
 
 #[allow(dead_code)]
-impl<S: StateMachine + 'static> Raft<S> {
-    pub(crate) fn new() -> Raft<S> {
-        Default::default()
-    }
-
-    pub(crate) fn with_storage(storage: Rc<RefCell<dyn Storage<S>>>) -> Raft<S> {
+impl Raft {
+    pub(crate) fn new(storage: Rc<RefCell<dyn Storage>>) -> Raft {
         Raft {
             server: Default::default(),
             storage
@@ -115,7 +102,7 @@ impl<S: StateMachine + 'static> Raft<S> {
     }
 
     /// See [`AppendEntries`].
-    pub(crate) fn append_entries(&mut self, request: AppendEntries<S::Command>) -> bool {
+    pub(crate) fn append_entries(&mut self, request: AppendEntries) -> bool {
         if request.term < self.server.lock().unwrap().current_term {
             return false;
         }
@@ -179,19 +166,23 @@ impl<S: StateMachine + 'static> Raft<S> {
     }
 }
 
+/*
 type Error = ();
 
 #[allow(dead_code)]
-impl<S: StateMachine> Raft<S> {
+impl Raft {
     fn handle_request(&mut self, _request: &S::Command) -> Result<S::Response, Error> {
         unimplemented!()
     }
 }
+*/
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use std::rc::Rc;
+    use crate::storage::MemoryStorage;
+    use serde_json;
 
     struct TestService(i64);
 
@@ -228,14 +219,14 @@ mod tests {
 
     const START_TERM: Term = 2;
 
-    fn valid_raft() -> (Raft<TestService>, Rc<RefCell<MemoryStorage<TestService>>>) {
+    fn valid_raft() -> (Raft, Rc<RefCell<MemoryStorage<TestService>>>) {
         let storage = Rc::new(RefCell::new(MemoryStorage::<TestService>::default()));
-        let raft: Raft<TestService> = Raft::with_storage(storage.clone());
+        let raft = Raft::new(storage.clone());
         raft.server.lock().unwrap().current_term = START_TERM;
         (raft, storage)
     }
 
-    fn valid_heartbeat<C>() -> AppendEntries<C> {
+    fn valid_heartbeat() -> AppendEntries {
         AppendEntries {
             term: START_TERM,
             leader_id: 1,
@@ -276,14 +267,18 @@ mod tests {
         );
     }
 
-    fn valid_append(c: Command) -> AppendEntries<Command> {
+    fn valid_append(c: Command) -> AppendEntries {
         AppendEntries {
-            entries: vec![c],
+            entries: entries(vec![c]),
             ..valid_heartbeat()
         }
     }
 
-    fn try_append(request: AppendEntries<Command>, raft: &mut Raft<TestService>) -> bool {
+    fn entries(cs: Vec<Command>) -> Vec<Vec<u8>> {
+        cs.into_iter().map(|c| serde_json::to_vec(&c).expect("could not serialize")).collect()
+    }
+
+    fn try_append(request: AppendEntries, raft: &mut Raft) -> bool {
         if !raft.append_entries(request.clone()) {
             println!("Request failed: {:#?}", request);
             return false;
@@ -303,8 +298,8 @@ mod tests {
     fn append_entries_follows_leader_commit() {
         fn send_with_commit(
             leader_commit: LogIndex,
-            request: AppendEntries<Command>,
-            raft: &mut Raft<TestService>,
+            request: AppendEntries,
+            raft: &mut Raft,
             storage: &mut Rc<RefCell<MemoryStorage<TestService>>>,
         ) {
             let last_log_index = storage.borrow().last_log_index();
@@ -404,7 +399,7 @@ mod tests {
             AppendEntries {
                 prev_log_index: None,
                 leader_commit: 1,
-                entries: vec![Increment, Increment, Increment],
+                entries: entries(vec![Increment, Increment, Increment]),
                 ..valid_heartbeat()
             },
             raft,

@@ -1,7 +1,7 @@
 use crate::protos::raft::{VoteRequest, VoteResponse};
 use crate::protos::raft_grpc::{self, RaftService, RaftServiceClient};
 use crate::server::Config;
-use crate::{Raft, Server, ServerId, StateMachine};
+use crate::{Raft, Server, ServerId};
 use futures::Future;
 use grpcio::{self, ChannelBuilder, EnvBuilder, Environment, RpcContext, ServerBuilder, UnarySink};
 use log::{debug, error, info, warn};
@@ -88,7 +88,7 @@ impl RpcState {
         server
     }
 
-    pub fn timeout<S: StateMachine>(&self, raft: &mut Raft<S>) {
+    pub fn timeout(&self, raft: &mut Raft) {
         let mut req = VoteRequest::new();
         req.set_term(raft.server.lock().unwrap().current_term);
         req.set_candidate(self.id);
