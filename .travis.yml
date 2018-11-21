@@ -3,7 +3,15 @@ rust:
   #- stable
   - beta
   - nightly
+cache:
+  directories:
+    - $HOME/.cargo
+    - $HOME/.cache
 matrix:
   allow_failures:
     - rust: nightly
   fast_finish: true
+
+before_script:
+  - export GRPC_VERSION=1.14.2
+  - source ci/install-grpc.sh
