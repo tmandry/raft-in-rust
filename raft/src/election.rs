@@ -1,7 +1,7 @@
 use crate::protos::raft::{VoteRequest, VoteResponse};
 use crate::protos::raft_grpc::{self, RaftService, RaftServiceClient};
 use crate::server::Config;
-use crate::{Raft, Server, ServerId};
+use crate::{Peer, ServerId};
 use futures::Future;
 use grpcio::{self, ChannelBuilder, EnvBuilder, Environment, RpcContext, ServerBuilder, UnarySink};
 use log::{debug, error, info, warn};
@@ -9,7 +9,7 @@ use std::collections::BTreeMap;
 use std::net::SocketAddr;
 use std::sync::{Arc, Mutex};
 
-impl RaftService for Arc<Mutex<Server>> {
+impl RaftService for Arc<Mutex<Peer>> {
     fn request_vote(&mut self, ctx: RpcContext, req: VoteRequest, sink: UnarySink<VoteResponse>) {
         info!("Got vote request from {}", req.get_candidate());
 
@@ -45,7 +45,7 @@ pub struct RpcState {
 }
 
 impl RpcState {
-    pub(crate) fn new(config: Config, server: Arc<Mutex<Server>>) -> Self {
+    pub(crate) fn new(config: Config, peer: Arc<Mutex<Peer>>) -> Self {
         let mut endpoints = config.endpoints;
         let my_endpoint = endpoints
             .remove(&config.id)
@@ -55,7 +55,7 @@ impl RpcState {
         RpcState {
             id: config.id,
             clients: Self::connect(endpoints, env.clone()),
-            server: Self::create_server(my_endpoint, env, server),
+            server: Self::create_server(my_endpoint, env, peer),
         }
     }
 
@@ -75,10 +75,10 @@ impl RpcState {
     fn create_server(
         endpoint: String,
         env: Arc<Environment>,
-        server: Arc<Mutex<Server>>,
+        peer: Arc<Mutex<Peer>>,
     ) -> grpcio::Server {
         let endpoint: SocketAddr = endpoint.parse().unwrap();
-        let service = raft_grpc::create_raft_service(server);
+        let service = raft_grpc::create_raft_service(peer);
         let mut server = ServerBuilder::new(env)
             .register_service(service)
             .bind(endpoint.ip().to_string(), endpoint.port())
@@ -88,23 +88,22 @@ impl RpcState {
         server
     }
 
-    pub fn timeout(&self, raft: &mut Raft) {
+    pub fn timeout(&self, peer: &mut Arc<Mutex<Peer>>) {
         let mut req = VoteRequest::new();
-        req.set_term(raft.server.lock().unwrap().current_term);
-        req.set_candidate(self.id);
 
-        let storage = raft.storage.borrow();
-        req.set_last_log_index(storage.last_log_index());
-        req.set_last_log_term(storage.last_log_term());
+        peer.lock().map(|mut peer| {
+            req.set_term(peer.current_term);
+            req.set_candidate(self.id);
 
-        // Update current term and vote for ourselves.
-        raft.server
-            .lock()
-            .map(|mut server| {
-                server.voted_for = Some(self.id);
-                server.current_term += 1;
-            })
-            .unwrap();
+            peer.storage.lock().map(|storage| {
+                req.set_last_log_index(storage.last_log_index());
+                req.set_last_log_term(storage.last_log_term());
+            }).unwrap();
+
+            // Update current term and vote for ourselves.
+            peer.voted_for = Some(self.id);
+            peer.current_term += 1;
+        }).unwrap();
 
         let votes_required = (self.clients.len() as i32 + 2) / 2;
         let votes_received: i32 = self
@@ -113,7 +112,7 @@ impl RpcState {
             .map(|client| client.request_vote(&req)) // FIXME async
             .filter_map(|resp| match resp {
                 Ok(reply) => {
-                    raft.server.lock().unwrap().saw_term(reply.term);
+                    peer.lock().unwrap().saw_term(reply.term);
                     if reply.vote_granted {
                         debug!("Received vote");
                         Some(1)

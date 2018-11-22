@@ -55,6 +55,6 @@ fn main() -> std::io::Result<()> {
     let mut server: RaftServer<sm::TestService> = RaftServer::new(config);
 
     sleep(Duration::from_millis((id as u64 + 2) * 100));
-    server.rpc.timeout(&mut server.raft);
+    server.rpc.timeout(&mut server.peer);
     Ok(())
 }

@@ -1,11 +1,10 @@
 use crate::election::RpcState;
-use crate::{Raft, ServerId, StateMachine};
+use crate::{Peer, ServerId, StateMachine};
 use crate::storage::MemoryStorage;
 use std::collections::BTreeMap;
 use std::fs::File;
 use std::io::{BufRead, BufReader};
-use std::rc::Rc;
-use std::cell::RefCell;
+use std::sync::{Arc, Mutex};
 
 #[derive(Clone, Debug)]
 pub struct Config {
@@ -28,21 +27,19 @@ impl Config {
     }
 }
 
-// FIXME: Find a name that's less confusing
-
-pub struct RaftServer<S: StateMachine> {
+pub struct RaftServer<S: StateMachine + Send + Sync> {
     pub rpc: RpcState,
-    pub raft: Raft,
-    pub storage: Rc<RefCell<MemoryStorage<S>>>,
+    pub peer: Arc<Mutex<Peer>>,
+    pub storage: Arc<Mutex<MemoryStorage<S>>>,
 }
 
 impl<S: StateMachine + 'static> RaftServer<S> {
     pub fn new(config: Config) -> Self {
-        let storage = Rc::new(RefCell::new(MemoryStorage::default()));
-        let raft: Raft = Raft::new(storage.clone());
+        let storage = Arc::new(Mutex::new(MemoryStorage::default()));
+        let peer = Arc::new(Mutex::new(Peer::new(storage.clone())));
         RaftServer {
-            rpc: RpcState::new(config, raft.server.clone()),
-            raft,
+            rpc: RpcState::new(config, peer.clone()),
+            peer,
             storage,
         }
     }
