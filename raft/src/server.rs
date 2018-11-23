@@ -4,7 +4,7 @@ use crate::storage::MemoryStorage;
 use std::collections::BTreeMap;
 use std::fs::File;
 use std::io::{BufRead, BufReader};
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, RwLock};
 
 #[derive(Clone, Debug)]
 pub struct Config {
@@ -30,12 +30,12 @@ impl Config {
 pub struct RaftServer<S: StateMachine + Send + Sync> {
     pub rpc: RpcState,
     pub peer: Arc<Mutex<Peer>>,
-    pub storage: Arc<Mutex<MemoryStorage<S>>>,
+    pub storage: Arc<RwLock<MemoryStorage<S>>>,
 }
 
 impl<S: StateMachine + 'static> RaftServer<S> {
     pub fn new(config: Config) -> Self {
-        let storage = Arc::new(Mutex::new(MemoryStorage::default()));
+        let storage = Arc::new(RwLock::new(MemoryStorage::default()));
         let peer = Arc::new(Mutex::new(Peer::new(storage.clone())));
         RaftServer {
             rpc: RpcState::new(config, peer.clone()),

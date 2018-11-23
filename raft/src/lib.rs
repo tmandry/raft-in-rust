@@ -7,7 +7,7 @@ use crate::storage::Storage;
 use serde::{de::DeserializeOwned, Serialize};
 use std::cmp::min;
 use std::fmt::Debug;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, RwLock};
 
 pub trait StateMachine: Default + Send + Sync {
     type Command: Serialize + DeserializeOwned + Clone + Debug;
@@ -33,7 +33,7 @@ pub struct Peer {
 
     /// Storage of our state and log entries.
     // TODO adopt more fine-grained concurrency
-    storage: Arc<Mutex<dyn Storage + Send + Sync>>,
+    storage: Arc<RwLock<dyn Storage + Send + Sync>>,
 }
 
 /// Invoked by leader to replicate log entries.
@@ -58,7 +58,7 @@ pub(crate) struct VoteRequest {
 }
 
 impl Peer {
-    pub(crate) fn new(storage: Arc<Mutex<dyn Storage + Send + Sync>>) -> Peer {
+    pub(crate) fn new(storage: Arc<RwLock<dyn Storage + Send + Sync>>) -> Peer {
         Peer {
             current_term: 0,
             voted_for: None,
@@ -76,7 +76,7 @@ impl Peer {
         self.saw_term(request.term);
 
         {
-            let mut storage = self.storage.lock().unwrap();
+            let mut storage = self.storage.write().unwrap();
             if let Some(prev_log_index) = request.prev_log_index {
                 if !storage.has_entry(prev_log_index, request.prev_log_term) {
                     return false;
@@ -104,7 +104,7 @@ impl Peer {
         }
         self.saw_term(req.term);
 
-        let last_log_term = self.storage.lock().unwrap().last_log_term();
+        let last_log_term = self.storage.read().unwrap().last_log_term();
         if self.voted_for.is_some()
             || req.last_log_term < last_log_term
             || req.last_log_index < self.last_commit
@@ -123,7 +123,7 @@ impl Peer {
             return;
         }
 
-        let mut storage = self.storage.lock().unwrap();
+        let mut storage = self.storage.write().unwrap();
 
         // Update last commit.
         self.last_commit = min(leader_commit, storage.last_log_index());
@@ -185,8 +185,8 @@ mod tests {
 
     const START_TERM: Term = 2;
 
-    fn valid_peer() -> (Peer, Arc<Mutex<MemoryStorage<TestService>>>) {
-        let storage = Arc::new(Mutex::new(MemoryStorage::<TestService>::default()));
+    fn valid_peer() -> (Peer, Arc<RwLock<MemoryStorage<TestService>>>) {
+        let storage = Arc::new(RwLock::new(MemoryStorage::<TestService>::default()));
         let mut peer = Peer::new(storage.clone());
         peer.current_term = START_TERM;
         (peer, storage)
@@ -257,9 +257,9 @@ mod tests {
     #[test]
     fn append_entries_appends_to_log_with_valid_request() {
         let (mut peer, storage) = valid_peer();
-        assert_eq!(0, storage.lock().unwrap().len());
+        assert_eq!(0, storage.read().unwrap().len());
         assert_eq!(true, peer.append_entries(valid_append(Increment)));
-        assert_eq!(1, storage.lock().unwrap().len());
+        assert_eq!(1, storage.read().unwrap().len());
     }
 
     #[test]
@@ -268,9 +268,9 @@ mod tests {
             leader_commit: LogIndex,
             request: AppendEntries,
             peer: &mut Peer,
-            storage: &mut Arc<Mutex<MemoryStorage<TestService>>>,
+            storage: &mut Arc<RwLock<MemoryStorage<TestService>>>,
         ) {
-            let last_log_index = storage.lock().unwrap().last_log_index();
+            let last_log_index = storage.read().unwrap().last_log_index();
             let last_log_index = match last_log_index {
                 0 => None,
                 _ => Some(last_log_index),
@@ -291,16 +291,16 @@ mod tests {
         send_with_commit(0, valid_append(Increment), peer, storage);
 
         // No entries have been committed yet.
-        assert_eq!(0, storage.lock().unwrap().state.0);
+        assert_eq!(0, storage.read().unwrap().state.0);
 
         send_with_commit(1, valid_append(Increment), peer, storage);
-        assert_eq!(1, storage.lock().unwrap().state.0);
+        assert_eq!(1, storage.read().unwrap().state.0);
         send_with_commit(1, valid_heartbeat(), peer, storage);
-        assert_eq!(1, storage.lock().unwrap().state.0);
+        assert_eq!(1, storage.read().unwrap().state.0);
         send_with_commit(2, valid_heartbeat(), peer, storage);
-        assert_eq!(2, storage.lock().unwrap().state.0);
+        assert_eq!(2, storage.read().unwrap().state.0);
         send_with_commit(4, valid_append(Increment), peer, storage);
-        assert_eq!(4, storage.lock().unwrap().state.0);
+        assert_eq!(4, storage.read().unwrap().state.0);
     }
 
     #[test]
@@ -329,7 +329,7 @@ mod tests {
             },
             peer,
         );
-        assert_eq!(5, storage.lock().unwrap().state.0);
+        assert_eq!(5, storage.read().unwrap().state.0);
 
         // New leader comes up 2 terms later, but did not see the last two uncommitted
         // entries. It did see the first uncommitted entry 6, though (still uncommitted).
@@ -342,7 +342,7 @@ mod tests {
             },
             peer,
         );
-        assert_eq!(5, storage.lock().unwrap().state.0);
+        assert_eq!(5, storage.read().unwrap().state.0);
 
         // New leader tells us about a new committed entry. At this point we can finally commit
         // entry 6 from the previous term, then apply entry 7 (a Double operation). This leaves us
@@ -356,7 +356,7 @@ mod tests {
             },
             peer,
         );
-        assert_eq!(12, storage.lock().unwrap().state.0);
+        assert_eq!(12, storage.read().unwrap().state.0);
     }
 
     #[test]
@@ -372,7 +372,7 @@ mod tests {
             },
             peer,
         );
-        assert_eq!(1, storage.lock().unwrap().state.0);
+        assert_eq!(1, storage.read().unwrap().state.0);
 
         try_append(
             AppendEntries {
@@ -382,6 +382,6 @@ mod tests {
             },
             peer,
         );
-        assert_eq!(3, storage.lock().unwrap().state.0);
+        assert_eq!(3, storage.read().unwrap().state.0);
     }
 }

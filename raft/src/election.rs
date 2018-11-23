@@ -95,7 +95,7 @@ impl RpcState {
             req.set_term(peer.current_term);
             req.set_candidate(self.id);
 
-            peer.storage.lock().map(|storage| {
+            peer.storage.read().map(|storage| {
                 req.set_last_log_index(storage.last_log_index());
                 req.set_last_log_term(storage.last_log_term());
             }).unwrap();
