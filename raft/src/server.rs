@@ -9,12 +9,14 @@ use std::collections::BTreeMap;
 use std::fs::File;
 use std::io::{BufRead, BufReader};
 use std::net::SocketAddr;
-use std::sync::{Arc, Mutex, RwLock};
+use std::sync::{Arc, Mutex, RwLock, Weak};
+
+pub type Endpoints = BTreeMap<ServerId, String>;
 
 #[derive(Clone, Debug)]
 pub struct Config {
     pub id: ServerId,
-    pub endpoints: BTreeMap<ServerId, String>,
+    pub endpoints: Endpoints,
 }
 
 impl Config {
@@ -34,102 +36,108 @@ impl Config {
 
 pub struct RaftServer {
     pub rpc: RpcState,
-    pub peer: Arc<Mutex<Peer>>,
+    pub peer: Peer,
     pub storage: Arc<RwLock<dyn Storage + Send + Sync>>,
 }
 
 impl RaftServer {
-    pub fn new(storage: Arc<RwLock<dyn Storage + Send + Sync>>, config: Config) -> Self {
-        let peer = Arc::new(Mutex::new(Peer::new(storage.clone())));
-        RaftServer {
-            rpc: RpcState::new(config, peer.clone()),
-            peer,
+    pub fn new(
+        storage: Arc<RwLock<dyn Storage + Send + Sync>>,
+        config: Config,
+    ) -> Arc<Mutex<Self>> {
+        let mut endpoints = config.endpoints;
+        let my_endpoint = endpoints
+            .remove(&config.id)
+            .expect("no server endpoint configured for my id!");
+
+        let server = Arc::new(Mutex::new(RaftServer {
+            rpc: RpcState::new(config.id),
+            peer: Peer::new(storage.clone()),
             storage,
-        }
+        }));
+
+        server
+            .lock()
+            .map(|mut this| {
+                this.rpc.connect(endpoints);
+                let weak_server = Arc::downgrade(&server);
+                this.rpc.create_rpc_server(my_endpoint, weak_server);
+            })
+            .unwrap();
+        server
     }
 }
 
 pub struct RpcState {
     id: ServerId,
     clients: BTreeMap<ServerId, RaftServiceClient>,
+    env: Arc<Environment>,
     #[allow(unused)]
-    server: grpcio::Server,
+    server: Option<grpcio::Server>,
 }
 
 impl RpcState {
-    pub(crate) fn new(config: Config, peer: Arc<Mutex<Peer>>) -> Self {
-        let mut endpoints = config.endpoints;
-        let my_endpoint = endpoints
-            .remove(&config.id)
-            .expect("no server endpoint configured for my id!");
-
+    pub(crate) fn new(id: ServerId) -> Self {
         let env = Arc::new(EnvBuilder::new().build());
         RpcState {
-            id: config.id,
-            clients: Self::connect(endpoints, env.clone()),
-            server: Self::create_server(my_endpoint, env, peer),
+            id: id,
+            clients: Default::default(),
+            env,
+            server: None, //Self::create_server(my_endpoint, env, peer),
         }
     }
 
-    fn connect(
-        endpoints: BTreeMap<ServerId, String>,
-        env: Arc<Environment>,
-    ) -> BTreeMap<ServerId, RaftServiceClient> {
-        let mut clients = BTreeMap::new();
+    fn connect(&mut self, endpoints: Endpoints) {
         for (id, endpoint) in endpoints {
-            let ch = ChannelBuilder::new(env.clone()).connect(&endpoint);
+            let ch = ChannelBuilder::new(self.env.clone()).connect(&endpoint);
             let client = RaftServiceClient::new(ch);
-            clients.insert(id, client);
+            self.clients.insert(id, client);
         }
-        clients
     }
 
-    fn create_server(
-        endpoint: String,
-        env: Arc<Environment>,
-        peer: Arc<Mutex<Peer>>,
-    ) -> grpcio::Server {
+    fn create_rpc_server(&mut self, endpoint: String, raft_server: Weak<Mutex<RaftServer>>) {
+        assert!(self.server.is_none());
         let endpoint: SocketAddr = endpoint.parse().unwrap();
-        let service = raft_grpc::create_raft_service(peer);
-        let mut server = ServerBuilder::new(env)
+        let service = raft_grpc::create_raft_service(raft_server);
+        let mut server = ServerBuilder::new(self.env.clone())
             .register_service(service)
             .bind(endpoint.ip().to_string(), endpoint.port())
             .build()
             .unwrap();
         server.start();
-        server
+        self.server = Some(server);
     }
+}
 
-    pub fn timeout(&self, peer: &mut Arc<Mutex<Peer>>) {
+impl RaftServer {
+    pub fn timeout(&mut self) {
         let mut req = VoteRequest::new();
 
-        peer.lock()
-            .map(|mut peer| {
-                req.set_term(peer.current_term);
-                req.set_candidate(self.id);
+        req.set_term(self.peer.current_term);
+        req.set_candidate(self.rpc.id);
 
-                peer.storage
-                    .read()
-                    .map(|storage| {
-                        req.set_last_log_index(storage.last_log_index());
-                        req.set_last_log_term(storage.last_log_term());
-                    })
-                    .unwrap();
-
-                // Update current term and vote for ourselves.
-                peer.voted_for = Some(self.id);
-                peer.current_term += 1;
+        let peer = &mut self.peer;
+        peer.storage
+            .read()
+            .map(|storage| {
+                req.set_last_log_index(storage.last_log_index());
+                req.set_last_log_term(storage.last_log_term());
             })
             .unwrap();
 
-        let votes_required = (self.clients.len() as i32 + 2) / 2;
+        // Update current term and vote for ourselves.
+        peer.voted_for = Some(self.rpc.id);
+        peer.current_term += 1;
+
+        let votes_required = (self.rpc.clients.len() as i32 + 2) / 2;
         let votes_received: i32 = self
+            .rpc
             .clients
             .values()
             .map(|client| client.request_vote(&req)) // FIXME async
             .filter_map(|resp| match resp {
                 Ok(reply) => {
-                    peer.lock().unwrap().saw_term(reply.term);
+                    peer.saw_term(reply.term);
                     if reply.vote_granted {
                         debug!("Received vote");
                         Some(1)
@@ -153,7 +161,7 @@ impl RpcState {
     }
 }
 
-impl RaftService for Arc<Mutex<Peer>> {
+impl RaftService for Weak<Mutex<RaftServer>> {
     fn request_vote(&mut self, ctx: RpcContext, req: VoteRequest, sink: UnarySink<VoteResponse>) {
         info!("Got vote request from {}", req.get_candidate());
 
@@ -161,14 +169,21 @@ impl RaftService for Arc<Mutex<Peer>> {
         let delay = std::env::args().nth(1).unwrap().parse::<u64>().unwrap();
         std::thread::sleep(std::time::Duration::from_millis(10 * delay));
 
-        let mut this = self.lock().unwrap();
+        let lock = self.upgrade();
+        let mut this = match lock {
+            Some(ref x) => x.lock().unwrap(),
+            None => {
+                warn!("Shutting down; ignoring VoteRequest");
+                return;
+            }
+        };
 
         let mut resp = VoteResponse::new();
-        resp.set_term(this.current_term);
-        let granted = match this.voted_for {
+        resp.set_term(this.peer.current_term);
+        let granted = match this.peer.voted_for {
             Some(_) => false,
             None => {
-                this.voted_for = Some(req.get_candidate());
+                this.peer.voted_for = Some(req.get_candidate());
                 true
             }
         };

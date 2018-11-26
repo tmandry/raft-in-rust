@@ -54,9 +54,9 @@ fn main() -> std::io::Result<()> {
         .expect("server id must be an integer");
     let config = Config::new(File::open("servers.txt")?, id);
     let storage = MemoryStorage::<sm::TestService>::new();
-    let mut server = RaftServer::new(storage, config);
+    let server = RaftServer::new(storage, config);
 
     sleep(Duration::from_millis((id as u64 + 2) * 100));
-    server.rpc.timeout(&mut server.peer);
+    server.lock().unwrap().timeout();
     Ok(())
 }
