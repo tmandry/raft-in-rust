@@ -2,8 +2,9 @@ use crate::{LogIndex, StateMachine, Term};
 use log::error;
 use serde_json;
 use std::collections::BTreeMap;
+use std::sync::{Arc, RwLock};
 
-pub(crate) trait Storage {
+pub trait Storage {
     /// Returns whether an entry with index `log_index` and term `log_term`
     /// exists in the storage.
     fn has_entry(&self, log_index: LogIndex, log_term: Term) -> bool;
@@ -58,6 +59,12 @@ pub struct MemoryStorage<S: StateMachine> {
 
     /// The index of the last log applied by us to our state.
     last_applied: LogIndex,
+}
+
+impl<S: StateMachine> MemoryStorage<S> {
+    pub fn new() -> Arc<RwLock<Self>> {
+        Arc::new(RwLock::new(Default::default()))
+    }
 }
 
 impl<S: StateMachine> Default for MemoryStorage<S> {

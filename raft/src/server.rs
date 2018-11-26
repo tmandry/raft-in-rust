@@ -1,6 +1,6 @@
 use crate::protos::raft::{VoteRequest, VoteResponse};
 use crate::protos::raft_grpc::{self, RaftService, RaftServiceClient};
-use crate::storage::MemoryStorage;
+use crate::storage::Storage;
 use crate::{Peer, ServerId, StateMachine};
 use futures::Future;
 use grpcio::{self, ChannelBuilder, EnvBuilder, Environment, RpcContext, ServerBuilder, UnarySink};
@@ -32,15 +32,14 @@ impl Config {
     }
 }
 
-pub struct RaftServer<S: StateMachine + Send + Sync> {
+pub struct RaftServer {
     pub rpc: RpcState,
     pub peer: Arc<Mutex<Peer>>,
-    pub storage: Arc<RwLock<MemoryStorage<S>>>,
+    pub storage: Arc<RwLock<dyn Storage + Send + Sync>>,
 }
 
-impl<S: StateMachine + 'static> RaftServer<S> {
-    pub fn new(config: Config) -> Self {
-        let storage = Arc::new(RwLock::new(MemoryStorage::default()));
+impl RaftServer {
+    pub fn new(storage: Arc<RwLock<dyn Storage + Send + Sync>>, config: Config) -> Self {
         let peer = Arc::new(Mutex::new(Peer::new(storage.clone())));
         RaftServer {
             rpc: RpcState::new(config, peer.clone()),

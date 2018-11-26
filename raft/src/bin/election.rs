@@ -1,4 +1,5 @@
 use raft::server::{Config, RaftServer};
+use raft::storage::MemoryStorage;
 use std::env;
 use std::fs::File;
 use std::thread::sleep;
@@ -52,7 +53,8 @@ fn main() -> std::io::Result<()> {
         .parse::<i32>()
         .expect("server id must be an integer");
     let config = Config::new(File::open("servers.txt")?, id);
-    let mut server: RaftServer<sm::TestService> = RaftServer::new(config);
+    let storage = MemoryStorage::<sm::TestService>::new();
+    let mut server = RaftServer::new(storage, config);
 
     sleep(Duration::from_millis((id as u64 + 2) * 100));
     server.rpc.timeout(&mut server.peer);
