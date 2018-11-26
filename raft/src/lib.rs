@@ -1,4 +1,3 @@
-pub mod election;
 pub(crate) mod protos;
 pub mod server;
 pub mod storage;
