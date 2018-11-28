@@ -48,7 +48,15 @@ pub(crate) struct AppendEntries {
     leader_commit: LogIndex,
 }
 
+/// Reasons why append_entries can fail.
+#[derive(Debug, PartialEq)]
+pub(crate) enum AppendEntriesError {
+    BadTerm,
+    NeedBackfill,
+}
+
 /// Invoked by candidates seeking election.
+#[derive(Debug)]
 pub(crate) struct VoteRequest {
     term: Term,
     candidate_id: ServerId,
@@ -68,9 +76,12 @@ impl Peer {
 
     /// Attempt to append the supplied entries to the log (see
     /// [`AppendEntries`].) Returns true on success.
-    pub(crate) fn append_entries(&mut self, request: AppendEntries) -> bool {
+    pub(crate) fn append_entries(
+        &mut self,
+        request: AppendEntries,
+    ) -> Result<(), AppendEntriesError> {
         if request.term < self.current_term {
-            return false;
+            return Err(AppendEntriesError::BadTerm);
         }
         self.saw_term(request.term);
 
@@ -78,7 +89,7 @@ impl Peer {
             let mut storage = self.storage.write().unwrap();
             if let Some(prev_log_index) = request.prev_log_index {
                 if !storage.has_entry(prev_log_index, request.prev_log_term) {
-                    return false;
+                    return Err(AppendEntriesError::NeedBackfill);
                 }
             }
 
@@ -90,7 +101,7 @@ impl Peer {
         }
 
         self.update_commit(request.leader_commit);
-        true
+        Ok(())
     }
 
     /// Process a vote request. Returns the whether or not the vote was granted.
@@ -205,14 +216,14 @@ mod tests {
     #[test]
     fn append_entries_succeeds_with_valid_request() {
         let (mut peer, _) = valid_peer();
-        assert_eq!(true, peer.append_entries(valid_heartbeat()));
+        assert!(peer.append_entries(valid_heartbeat()).is_ok());
     }
 
     #[test]
     fn append_entries_fails_with_unknown_log_index() {
         let (mut peer, _) = valid_peer();
         assert_eq!(
-            false,
+            Err(AppendEntriesError::NeedBackfill),
             peer.append_entries(AppendEntries {
                 prev_log_index: Some(5),
                 ..valid_heartbeat()
@@ -224,7 +235,7 @@ mod tests {
     fn append_entries_fails_with_old_term() {
         let (mut peer, _) = valid_peer();
         assert_eq!(
-            false,
+            Err(AppendEntriesError::BadTerm),
             peer.append_entries(AppendEntries {
                 term: 1,
                 ..valid_heartbeat()
@@ -246,7 +257,7 @@ mod tests {
     }
 
     fn try_append(request: AppendEntries, peer: &mut Peer) -> bool {
-        if !peer.append_entries(request.clone()) {
+        if !peer.append_entries(request.clone()).is_ok() {
             println!("Request failed: {:#?}", request);
             return false;
         }
@@ -257,7 +268,7 @@ mod tests {
     fn append_entries_appends_to_log_with_valid_request() {
         let (mut peer, storage) = valid_peer();
         assert_eq!(0, storage.read().unwrap().len());
-        assert_eq!(true, peer.append_entries(valid_append(Increment)));
+        assert!(peer.append_entries(valid_append(Increment)).is_ok());
         assert_eq!(1, storage.read().unwrap().len());
     }
 
