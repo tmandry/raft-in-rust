@@ -1,7 +1,7 @@
-use crate::protos::raft::{VoteRequest, VoteResponse};
+use crate::protos::raft as protos;
 use crate::protos::raft_grpc::{self, RaftService, RaftServiceClient};
 use crate::storage::Storage;
-use crate::{Peer, ServerId, StateMachine};
+use crate::{Peer, ServerId, StateMachine, VoteRequest};
 use futures::Future;
 use grpcio::{self, ChannelBuilder, EnvBuilder, Environment, RpcContext, ServerBuilder, UnarySink};
 use log::{debug, error, info, warn};
@@ -111,7 +111,7 @@ impl RpcState {
 
 impl RaftServer {
     pub fn timeout(&mut self) {
-        let mut req = VoteRequest::new();
+        let mut req = protos::VoteRequest::new();
 
         req.set_term(self.peer.current_term);
         req.set_candidate(self.rpc.id);
@@ -162,7 +162,12 @@ impl RaftServer {
 }
 
 impl RaftService for Weak<Mutex<RaftServer>> {
-    fn request_vote(&mut self, ctx: RpcContext, req: VoteRequest, sink: UnarySink<VoteResponse>) {
+    fn request_vote(
+        &mut self,
+        ctx: RpcContext,
+        req: protos::VoteRequest,
+        sink: UnarySink<protos::VoteResponse>,
+    ) {
         info!("Got vote request from {}", req.get_candidate());
 
         // Introduce some artificial delay to make things more interesting.
@@ -178,16 +183,16 @@ impl RaftService for Weak<Mutex<RaftServer>> {
             }
         };
 
-        let mut resp = VoteResponse::new();
+        let mut resp = protos::VoteResponse::new();
         resp.set_term(this.peer.current_term);
-        let granted = match this.peer.voted_for {
-            Some(_) => false,
-            None => {
-                this.peer.voted_for = Some(req.get_candidate());
-                true
-            }
-        };
-        resp.set_vote_granted(granted);
+        let (granted, term) = this.peer.request_vote(&VoteRequest {
+            term: req.term,
+            candidate_id: req.candidate,
+            last_log_index: req.last_log_index,
+            last_log_term: req.last_log_term,
+        });
+        resp.term = term;
+        resp.vote_granted = granted;
 
         let f = sink
             .success(resp)
