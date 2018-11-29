@@ -1,7 +1,7 @@
 use crate::protos::raft as protos;
 use crate::protos::raft_grpc::{self, RaftService, RaftServiceClient};
 use crate::storage::Storage;
-use crate::{Peer, ServerId, StateMachine, VoteRequest};
+use crate::{AppendEntries, Peer, ServerId, VoteRequest};
 use futures::Future;
 use grpcio::{self, ChannelBuilder, EnvBuilder, Environment, RpcContext, ServerBuilder, UnarySink};
 use log::{debug, error, info, warn};
@@ -168,7 +168,7 @@ impl RaftService for Weak<Mutex<RaftServer>> {
         req: protos::VoteRequest,
         sink: UnarySink<protos::VoteResponse>,
     ) {
-        info!("Got vote request from {}", req.get_candidate());
+        info!("Got vote request from {}", req.candidate);
 
         // Introduce some artificial delay to make things more interesting.
         let delay = std::env::args().nth(1).unwrap().parse::<u64>().unwrap();
@@ -178,25 +178,68 @@ impl RaftService for Weak<Mutex<RaftServer>> {
         let mut this = match lock {
             Some(ref x) => x.lock().unwrap(),
             None => {
-                warn!("Shutting down; ignoring VoteRequest");
+                warn!("Shutting down; ignoring RequestVote");
                 return;
             }
         };
 
-        let mut resp = protos::VoteResponse::new();
-        resp.set_term(this.peer.current_term);
         let (granted, term) = this.peer.request_vote(&VoteRequest {
             term: req.term,
             candidate_id: req.candidate,
             last_log_index: req.last_log_index,
             last_log_term: req.last_log_term,
         });
+
+        let mut resp = protos::VoteResponse::new();
         resp.term = term;
         resp.vote_granted = granted;
 
         let f = sink
             .success(resp)
             .map_err(move |e| warn!("Failed to reply to {:?}: {:?}", req, e));
+        ctx.spawn(f)
+    }
+
+    fn append_entries(
+        &mut self,
+        ctx: RpcContext,
+        req: protos::AppendRequest,
+        sink: UnarySink<protos::AppendResponse>,
+    ) {
+        debug!("Got append request from {}", req.leader_id);
+
+        let lock = self.upgrade();
+        let mut this = match lock {
+            Some(ref x) => x.lock().unwrap(),
+            None => {
+                warn!("Shutting down; ignoring AppendEntries");
+                return;
+            }
+        };
+
+        let success = this
+            .peer
+            .append_entries(AppendEntries {
+                term: req.term,
+                leader_id: req.leader_id,
+                prev_log_index: if req.prev_log_index == 0 {
+                    None
+                } else {
+                    Some(req.prev_log_index)
+                },
+                prev_log_term: req.prev_log_term,
+                leader_commit: req.leader_commit,
+                entries: req.entries.into_vec(),
+            })
+            .is_ok();
+
+        let mut resp = protos::AppendResponse::new();
+        resp.term = this.peer.term();
+        resp.success = success;
+
+        let f = sink
+            .success(resp)
+            .map_err(move |e| warn!("Failed to reply to AppendEntries: {:?}", e));
         ctx.spawn(f)
     }
 }

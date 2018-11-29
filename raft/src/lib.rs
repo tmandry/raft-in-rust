@@ -150,6 +150,10 @@ impl Peer {
             self.voted_for = None;
         }
     }
+
+    pub(crate) fn term(&self) -> Term {
+        self.current_term
+    }
 }
 
 #[cfg(test)]
