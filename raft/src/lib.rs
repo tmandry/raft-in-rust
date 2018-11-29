@@ -107,10 +107,8 @@ impl Peer {
     /// Process a vote request. Returns the whether or not the vote was granted.
     /// Also returns the current term.
     pub(crate) fn request_vote(&mut self, req: &VoteRequest) -> (bool, Term) {
-        let current_term = self.current_term;
-
-        if req.term < current_term {
-            return (false, current_term);
+        if req.term < self.current_term {
+            return (false, self.current_term);
         }
         self.saw_term(req.term);
 
@@ -119,13 +117,13 @@ impl Peer {
             || req.last_log_term < last_log_term
             || req.last_log_index < self.last_commit
         {
-            return (false, current_term);
+            return (false, self.current_term);
         }
 
         // TODO persist on stable storage before responding
         self.voted_for = Some(req.candidate_id);
 
-        return (true, current_term);
+        return (true, self.current_term);
     }
 
     fn update_commit(&mut self, leader_commit: LogIndex) {

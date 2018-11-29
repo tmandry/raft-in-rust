@@ -1,7 +1,7 @@
 use crate::protos::raft as protos;
 use crate::protos::raft_grpc::{self, RaftService, RaftServiceClient};
 use crate::storage::Storage;
-use crate::{AppendEntries, Peer, ServerId, VoteRequest};
+use crate::{AppendEntries, Peer, ServerId, Term, VoteRequest};
 
 use chrono::Duration;
 use futures::Future;
@@ -53,6 +53,14 @@ pub struct RaftServer {
     scheduled_timeout: Option<timer::Guard>,
 
     weak_self: Weak<Mutex<RaftServer>>,
+
+    state: RaftState,
+}
+
+enum RaftState {
+    Follower,
+    Candidate { num_votes: i32 },
+    Leader,
 }
 
 impl RaftServer {
@@ -74,10 +82,14 @@ impl RaftServer {
             rpc: RpcState::new(config.id),
             peer: Peer::new(storage.clone()),
             storage,
+
             timeout,
             timer: Timer::new(),
             scheduled_timeout: None,
+
             weak_self: Weak::new(),
+
+            state: RaftState::Follower,
         }));
 
         server
@@ -151,6 +163,7 @@ impl RaftServer {
     }
 
     pub fn timeout(&mut self) {
+        self.state = RaftState::Candidate { num_votes: 1 }; // we're going to vote for ourselves.
         self.reset_timeout();
 
         let mut req = protos::VoteRequest::new();
@@ -169,40 +182,76 @@ impl RaftServer {
 
         // Update current term and vote for ourselves.
         peer.voted_for = Some(self.rpc.id);
-        peer.current_term  = new_term;
+        peer.current_term = new_term;
 
-        info!("Timeout occurred; starting new election with term {}", new_term);
+        info!(
+            "Timeout occurred; starting new election with term {}",
+            new_term
+        );
 
-        // TODO Handle requests asynchronously. (Required for timeout to work.)
-        let votes_required = (self.rpc.clients.len() as i32 + 2) / 2;
-        let votes_received: i32 = self
-            .rpc
-            .clients
-            .values()
-            .map(|client| client.request_vote(&req))
-            .filter_map(|resp| match resp {
-                Ok(reply) => {
-                    peer.saw_term(reply.term);
-                    if reply.vote_granted {
-                        debug!("Received vote");
-                        Some(1)
-                    } else {
-                        None
-                    }
-                }
+        for client in self.rpc.clients.values() {
+            let weak_self = self.weak_self.clone();
+            let request = match client.request_vote_async(&req) {
+                Ok(x) => x,
                 Err(e) => {
-                    error!("Error received during vote request: {:?}", e);
-                    None
+                    warn!("Error while sending vote request: {}", e);
+                    return;
                 }
-            })
-            .take(votes_required as usize)
-            .sum();
+            };
 
-        if votes_received >= votes_required {
-            info!("Received {} votes and elected!", votes_received);
-        } else {
-            info!("Received {} votes, not elected.", votes_received);
+            let task = request
+                .map(move |resp| {
+                    let server = weak_self.upgrade();
+                    let mut this = match server {
+                        Some(ref lock) => lock.lock().unwrap(),
+                        None => return,
+                    };
+
+                    if resp.vote_granted {
+                        this.received_vote(resp.term);
+                    }
+                })
+                .map_err(|e| {
+                    error!("Error received during vote request: {:?}", e);
+                });
+            client.spawn(task);
         }
+    }
+
+    fn saw_term(&mut self, term: Term) {
+        if term > self.peer.term() {
+            self.state = RaftState::Follower
+        }
+        self.peer.saw_term(term);
+    }
+
+    fn received_vote(&mut self, term: Term) {
+        let current_term = self.peer.term();
+        self.saw_term(term);
+        if term != current_term {
+            debug!("Received vote, but for an old term");
+            return;
+        }
+
+        let num_votes = match self.state {
+            RaftState::Candidate { num_votes } => num_votes + 1,
+            _ => {
+                debug!("Received vote, but no longer a candidate");
+                return;
+            }
+        };
+
+        debug!("Received vote");
+        self.state = RaftState::Candidate { num_votes };
+
+        if num_votes >= self.votes_required() {
+            info!("Elected leader");
+            self.state = RaftState::Leader;
+        }
+    }
+
+    fn votes_required(&self) -> i32 {
+        (self.rpc.clients.len() as i32 + 2) / 2
     }
 }
 
