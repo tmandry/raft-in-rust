@@ -315,25 +315,30 @@ impl RaftService for Weak<Mutex<RaftServer>> {
             }
         };
 
-        let success = this
-            .peer
-            .append_entries(AppendEntries {
-                term: req.term,
-                leader_id: req.leader_id,
-                prev_log_index: if req.prev_log_index == 0 {
-                    None
-                } else {
-                    Some(req.prev_log_index)
-                },
-                prev_log_term: req.prev_log_term,
-                leader_commit: req.leader_commit,
-                entries: req.entries.into_vec(),
-            })
-            .is_ok();
+        let result = this.peer.append_entries(AppendEntries {
+            term: req.term,
+            leader_id: req.leader_id,
+            prev_log_index: if req.prev_log_index == 0 {
+                None
+            } else {
+                Some(req.prev_log_index)
+            },
+            prev_log_term: req.prev_log_term,
+            leader_commit: req.leader_commit,
+            entries: req.entries.into_vec(),
+        });
+
+        use crate::AppendEntriesError::*;
+        match result {
+            Ok(_) => this.reset_timeout(),
+            Err(NeedBackfill) => this.reset_timeout(),
+            // Don't reset timeout for BadTerm; we haven't seen a valid request.
+            Err(BadTerm) => {}
+        };
 
         let mut resp = protos::AppendResponse::new();
         resp.term = this.peer.term();
-        resp.success = success;
+        resp.success = result.is_ok();
 
         let f = sink
             .success(resp)
