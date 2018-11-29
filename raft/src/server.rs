@@ -2,14 +2,18 @@ use crate::protos::raft as protos;
 use crate::protos::raft_grpc::{self, RaftService, RaftServiceClient};
 use crate::storage::Storage;
 use crate::{AppendEntries, Peer, ServerId, VoteRequest};
+
+use chrono::Duration;
 use futures::Future;
 use grpcio::{self, ChannelBuilder, EnvBuilder, Environment, RpcContext, ServerBuilder, UnarySink};
 use log::{debug, error, info, warn};
+use rand::Rng;
 use std::collections::BTreeMap;
 use std::fs::File;
 use std::io::{BufRead, BufReader};
 use std::net::SocketAddr;
 use std::sync::{Arc, Mutex, RwLock, Weak};
+use timer::{self, Timer};
 
 pub type Endpoints = BTreeMap<ServerId, String>;
 
@@ -17,6 +21,8 @@ pub type Endpoints = BTreeMap<ServerId, String>;
 pub struct Config {
     pub id: ServerId,
     pub endpoints: Endpoints,
+    pub min_timeout_ms: i64,
+    pub max_timeout_ms: i64,
 }
 
 impl Config {
@@ -24,6 +30,9 @@ impl Config {
         let mut conf = Config {
             id,
             endpoints: Default::default(),
+            // TODO read from config file
+            min_timeout_ms: 1000,
+            max_timeout_ms: 3000,
         };
         let reader = BufReader::new(servers);
         for (index, endpoint) in reader.lines().enumerate() {
@@ -38,6 +47,12 @@ pub struct RaftServer {
     pub rpc: RpcState,
     pub peer: Peer,
     pub storage: Arc<RwLock<dyn Storage + Send + Sync>>,
+
+    timeout: Duration,
+    timer: Timer,
+    scheduled_timeout: Option<timer::Guard>,
+
+    weak_self: Weak<Mutex<RaftServer>>,
 }
 
 impl RaftServer {
@@ -50,10 +65,19 @@ impl RaftServer {
             .remove(&config.id)
             .expect("no server endpoint configured for my id!");
 
+        let timeout = chrono::Duration::milliseconds(
+            rand::thread_rng().gen_range(config.min_timeout_ms, config.max_timeout_ms),
+        );
+        info!("Setting timeout to {}", timeout);
+
         let server = Arc::new(Mutex::new(RaftServer {
             rpc: RpcState::new(config.id),
             peer: Peer::new(storage.clone()),
             storage,
+            timeout,
+            timer: Timer::new(),
+            scheduled_timeout: None,
+            weak_self: Weak::new(),
         }));
 
         server
@@ -61,7 +85,10 @@ impl RaftServer {
             .map(|mut this| {
                 this.rpc.connect(endpoints);
                 let weak_server = Arc::downgrade(&server);
-                this.rpc.create_rpc_server(my_endpoint, weak_server);
+                this.rpc.create_rpc_server(my_endpoint, weak_server.clone());
+
+                this.weak_self = weak_server;
+                this.reset_timeout();
             })
             .unwrap();
         server
@@ -110,13 +137,28 @@ impl RpcState {
 }
 
 impl RaftServer {
+    fn reset_timeout(&mut self) {
+        let weak_self = self.weak_self.clone();
+        let guard = self.timer.schedule_with_delay(self.timeout, move || {
+            let server = weak_self.upgrade();
+            let mut this = match server {
+                Some(ref lock) => lock.lock().unwrap(),
+                None => return,
+            };
+            this.timeout();
+        });
+        self.scheduled_timeout = Some(guard);
+    }
+
     pub fn timeout(&mut self) {
+        self.reset_timeout();
+
         let mut req = protos::VoteRequest::new();
 
-        req.set_term(self.peer.current_term);
-        req.set_candidate(self.rpc.id);
-
         let peer = &mut self.peer;
+        let new_term = peer.current_term + 1;
+        req.set_term(new_term);
+        req.set_candidate(self.rpc.id);
         peer.storage
             .read()
             .map(|storage| {
@@ -127,14 +169,17 @@ impl RaftServer {
 
         // Update current term and vote for ourselves.
         peer.voted_for = Some(self.rpc.id);
-        peer.current_term += 1;
+        peer.current_term  = new_term;
 
+        info!("Timeout occurred; starting new election with term {}", new_term);
+
+        // TODO Handle requests asynchronously. (Required for timeout to work.)
         let votes_required = (self.rpc.clients.len() as i32 + 2) / 2;
         let votes_received: i32 = self
             .rpc
             .clients
             .values()
-            .map(|client| client.request_vote(&req)) // FIXME async
+            .map(|client| client.request_vote(&req))
             .filter_map(|resp| match resp {
                 Ok(reply) => {
                     peer.saw_term(reply.term);
@@ -189,6 +234,10 @@ impl RaftService for Weak<Mutex<RaftServer>> {
             last_log_index: req.last_log_index,
             last_log_term: req.last_log_term,
         });
+
+        if granted {
+            this.reset_timeout();
+        }
 
         let mut resp = protos::VoteResponse::new();
         resp.term = term;

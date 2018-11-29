@@ -2,8 +2,6 @@ use raft::server::{Config, RaftServer};
 use raft::storage::MemoryStorage;
 use std::env;
 use std::fs::File;
-use std::thread::sleep;
-use std::time::Duration;
 
 mod sm {
     use raft::StateMachine;
@@ -54,9 +52,9 @@ fn main() -> std::io::Result<()> {
         .expect("server id must be an integer");
     let config = Config::new(File::open("servers.txt")?, id);
     let storage = MemoryStorage::<sm::TestService>::new();
-    let server = RaftServer::new(storage, config);
+    let _server = RaftServer::new(storage, config);
 
-    sleep(Duration::from_millis((id as u64 + 2) * 100));
-    server.lock().unwrap().timeout();
-    Ok(())
+    loop {
+        std::thread::park();
+    }
 }
