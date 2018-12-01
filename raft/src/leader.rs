@@ -87,7 +87,7 @@ impl RaftServer {
     pub fn apply_one(
         &mut self,
         entry: Vec<u8>,
-    ) -> Box<dyn Future<Item = Vec<u8>, Error = ApplyError>> {
+    ) -> Box<dyn Future<Item = Vec<u8>, Error = ApplyError> + Send> {
         self.schedule_heartbeat();
 
         match self.state {
@@ -99,9 +99,7 @@ impl RaftServer {
         let last_log_index = self.peer.storage.read().unwrap().last_log_index();
         self.peer.update_commit(last_log_index);
 
-        self.peer.append_local(vec![entry.clone()]);
-
-        let req = self.append_request(vec![entry]);
+        let req = self.append_request(vec![entry.clone()]);
         let requests =
             self.rpc
                 .clients
@@ -114,6 +112,7 @@ impl RaftServer {
                     }
                 });
 
+        self.peer.append_local(vec![entry]);
         let appends = Arc::new(AtomicUsize::new(1)); // count ourselves
         self.combine_requests(requests, appends)
     }
@@ -129,35 +128,46 @@ impl RaftServer {
     where
         F::Error: std::fmt::Debug,
     {
+        trace!(
+            "combine_requests(appends={})",
+            appends.load(Ordering::SeqCst)
+        );
         let server = self.weak_self.clone();
         Box::new(futures::select_all(requests).then(
             move |result| -> Box<dyn Future<Item = Vec<u8>, Error = ApplyError> + Send> {
+                match &result {
+                    Ok((r, _, _)) => trace!("AppendEntries response: {:?}", r),
+                    Err((e, _, _)) => trace!("AppendEntries error: {:?}", e),
+                };
                 upgrade_or_return!(server, Box::new(future::ok(vec![])));
 
                 let rest: Vec<_> = match result {
                     Ok((response, _index, rest)) => {
-                        if !response.success {
+                        let should_commit = if response.success {
+                            let total = appends.fetch_add(1, Ordering::SeqCst) + 1;
+                            total as i32 == server.majority()
+                        } else {
                             // TODO: retry failed requests due to log inconsistency
                             warn!("Log inconsistency detected, TODO retry");
-                            return server.combine_requests(rest, appends.clone());
-                        }
+                            false
+                        };
 
-                        let total = appends.fetch_add(1, Ordering::SeqCst) + 1;
-                        if total as i32 == server.majority() {
+                        if should_commit {
                             // Commit the response.
+                            trace!("committing");
                             let result = match server.peer.apply_one() {
                                 Ok(r) => Box::new(future::ok(r)),
                                 Err(e) => Box::new(future::err(ApplyError::StorageError(e))),
                             };
+                            trace!("  result = {:?}", result);
 
                             // Can immediately return the result, but have to keep the
                             // remaining futures alive.
-                            let remaining = server
-                                .combine_requests(rest, appends.clone())
+                            let remaining = future::join_all(rest)
                                 .map(|_| ())
                                 .map_err(|e| {
-                                    panic!(
-                                        "Should not have received apply error after applying: {:?}",
+                                    warn!(
+                                        "Error while sending append request (applied): {:?}",
                                         e
                                     );
                                 });

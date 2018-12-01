@@ -54,6 +54,7 @@ struct LogEntry<Entry> {
 /// Committed logs don't need this - we can optimize later.
 type Log<Entry> = BTreeMap<LogIndex, LogEntry<Entry>>;
 
+#[derive(Debug)]
 pub struct MemoryStorage<S: StateMachine> {
     /// The log of commands issued.
     log: Log<Vec<u8>>,
@@ -147,7 +148,7 @@ impl<S: StateMachine> Storage for MemoryStorage<S> {
     }
 
     fn apply_one(&mut self) -> Result<Vec<u8>, Error> {
-        assert!(self.last_applied < self.last_log_index());
+        assert!(self.last_applied < self.last_log_index(), "{:?}", self);
         let index = self.last_applied + 1;
         let response = do_apply_with_response(&mut self.state, &self.log[&index].entry)?;
         self.last_applied = index;

@@ -9,12 +9,13 @@ pub mod storage;
 pub use self::leader::ApplyError;
 
 use crate::storage::Storage;
+use log::*;
 use serde::{de::DeserializeOwned, Serialize};
 use std::cmp::min;
 use std::fmt::Debug;
 use std::sync::{Arc, RwLock};
 
-pub trait StateMachine: Default + Send + Sync {
+pub trait StateMachine: Default + Send + Sync + Debug {
     type Command: Serialize + DeserializeOwned + Clone + Debug;
     type Response: Serialize + DeserializeOwned + Clone + Debug;
 
@@ -86,6 +87,7 @@ impl Peer {
         &mut self,
         request: AppendEntries,
     ) -> Result<(), AppendEntriesError> {
+        trace!("append_entries({:?})", request);
         if request.term < self.current_term {
             return Err(AppendEntriesError::BadTerm);
         }
@@ -113,7 +115,7 @@ impl Peer {
     pub(crate) fn append_local(&mut self, entries: Vec<Vec<u8>>) {
         let mut storage = self.storage.write().unwrap();
         let last_log_index = storage.last_log_index();
-        storage.append(entries, last_log_index, self.current_term);
+        storage.append(entries, last_log_index + 1, self.current_term);
     }
 
     pub(crate) fn apply_one(&mut self) -> Result<Vec<u8>, storage::Error> {
@@ -126,22 +128,31 @@ impl Peer {
     /// Process a vote request. Returns the whether or not the vote was granted.
     /// Also returns the current term.
     pub(crate) fn request_vote(&mut self, req: &VoteRequest) -> (bool, Term) {
+        trace!(
+            "request_vote({:?}, current_term={}, voted_for={:?}, last_commit={}, last_log_term={}",
+            req,
+            self.current_term,
+            self.voted_for,
+            self.last_commit,
+            self.storage.read().unwrap().last_log_term()
+        );
         if req.term < self.current_term {
             return (false, self.current_term);
         }
-        self.saw_term(req.term);
 
         let last_log_term = self.storage.read().unwrap().last_log_term();
-        if self.voted_for.is_some()
-            || req.last_log_term < last_log_term
-            || req.last_log_index < self.last_commit
+        if req.last_log_term < last_log_term || req.last_log_index < self.last_commit
         {
+            return (false, self.current_term);
+        }
+
+        self.saw_term(req.term);
+        if self.voted_for.is_some() {
             return (false, self.current_term);
         }
 
         // TODO persist on stable storage before responding
         self.voted_for = Some(req.candidate_id);
-
         return (true, self.current_term);
     }
 

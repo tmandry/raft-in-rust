@@ -8,7 +8,7 @@ use crate::{AppendEntries, Peer, ServerId, Term, VoteRequest};
 use chrono::Duration;
 use futures::Future;
 use grpcio::{self, ChannelBuilder, EnvBuilder, Environment, RpcContext, ServerBuilder, UnarySink};
-use log::{debug, error, info, warn};
+use log::*;
 use rand::Rng;
 use std::collections::BTreeMap;
 use std::fs::File;
@@ -34,8 +34,8 @@ impl Config {
             id,
             endpoints: Default::default(),
             // TODO read from config file
-            min_timeout_ms: 1000,
-            max_timeout_ms: 3000,
+            min_timeout_ms: 600,
+            max_timeout_ms: 800,
             heartbeat_frequency_ms: 500,
         };
         let reader = BufReader::new(servers);
@@ -126,6 +126,13 @@ impl RaftServer {
     pub(crate) fn other_server_ids(&self) -> impl Iterator<Item = &ServerId> {
         self.rpc.clients.keys()
     }
+
+    pub fn spawn<F>(&self, f: F)
+    where
+        F: Future<Item = (), Error = ()> + Send + 'static,
+    {
+        self.rpc.clients.values().next().unwrap().spawn(f);
+    }
 }
 
 pub struct RpcState {
@@ -213,7 +220,7 @@ impl RaftServer {
         );
 
         for client in self.rpc.clients.values() {
-            let weak_self = self.weak_self.clone();
+            let server = self.weak_self.clone();
             let request = match client.request_vote_async(&req) {
                 Ok(x) => x,
                 Err(e) => {
@@ -223,10 +230,12 @@ impl RaftServer {
             };
             let task = request
                 .map(move |resp| {
+                    trace!("request_vote response: {:?} {}", resp, resp.vote_granted);
+                    upgrade_or_return!(server);
                     if resp.vote_granted {
-                        upgrade_or_return!(weak_self);
-                        weak_self.received_vote(resp.term);
+                        server.received_vote(resp.term);
                     }
+                    server.saw_term(resp.term);
                 })
                 .map_err(|e| {
                     error!("Error received during vote request: {:?}", e);
@@ -297,15 +306,16 @@ impl RaftService for Weak<Mutex<RaftServer>> {
             }
         };
 
-        this.saw_term(req.term);
         let (granted, term) = this.peer.request_vote(&VoteRequest {
             term: req.term,
             candidate_id: req.candidate,
             last_log_index: req.last_log_index,
             last_log_term: req.last_log_term,
         });
+        trace!("request_vote() => ({}, {})", granted, term);
 
         if granted {
+            this.state = RaftState::Follower;
             this.reset_timeout();
         }
 
@@ -349,6 +359,7 @@ impl RaftService for Weak<Mutex<RaftServer>> {
             leader_commit: req.leader_commit,
             entries: req.entries.into_vec(),
         });
+        trace!("append_entries() returned {:?}", result);
 
         use crate::AppendEntriesError::*;
         match result {
