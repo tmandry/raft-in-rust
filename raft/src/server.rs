@@ -171,6 +171,11 @@ impl RpcState {
 
 impl RaftServer {
     fn reset_timeout(&mut self) {
+        if let RaftState::Leader(_) = self.state {
+            // It would be silly to schedule timeouts when we're the leader.
+            return;
+        }
+
         let weak_self = self.weak_self.clone();
         let guard = self.timer.schedule_with_delay(self.timeout, move || {
             upgrade_or_return!(weak_self);
@@ -235,6 +240,7 @@ impl RaftServer {
         if term > self.peer.term() {
             info!("Saw term {}, now a follower", term);
             self.state = RaftState::Follower;
+            self.reset_timeout();
         }
         self.peer.saw_term(term);
     }
@@ -260,6 +266,7 @@ impl RaftServer {
 
         if num_votes >= self.votes_required() {
             info!("Elected leader");
+            self.scheduled_timeout = None;
             self.become_leader();
         }
     }
