@@ -1,5 +1,6 @@
 //! Defines the behavior of the leader.
 
+use crate::protos::raft as protos;
 use crate::server::{RaftServer, RaftState};
 use crate::{LogIndex, ServerId};
 
@@ -46,8 +47,42 @@ impl RaftServer {
             _ => return,
         };
 
-        // TODO
-        debug!("TODO: Send heartbeat");
+        debug!("Sending heartbeat");
+
+        let mut req = protos::AppendRequest::new();
+        req.set_term(self.peer.current_term);
+        req.set_leader_id(self.id());
+        self.peer
+            .storage
+            .read()
+            .map(|storage| {
+                req.set_prev_log_index(storage.last_log_index());
+                req.set_prev_log_term(storage.last_log_term());
+            })
+            .unwrap();
+        req.set_leader_commit(self.peer.last_commit);
+
+        for client in self.rpc.clients.values() {
+            //let weak_self = self.weak_self.clone();
+            let request = match client.append_entries_async(&req) {
+                Ok(x) => x,
+                Err(e) => {
+                    warn!("Error while sending heartbeat: {}", e);
+                    return;
+                }
+            };
+            let task = request
+                .map(|resp| {
+                    if !resp.success {
+                        // TODO: retry failed requests due to log inconsistency
+                        warn!("Log inconsistency detected, TODO retry");
+                    }
+                })
+                .map_err(|e| {
+                    warn!("Error received from heartbeat: {:?}", e);
+                });
+            client.spawn(task);
+        }
 
         self.schedule_heartbeat();
     }

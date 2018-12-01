@@ -130,7 +130,7 @@ impl RaftServer {
 
 pub struct RpcState {
     id: ServerId,
-    clients: BTreeMap<ServerId, RaftServiceClient>,
+    pub(crate) clients: BTreeMap<ServerId, RaftServiceClient>,
     env: Arc<Environment>,
     #[allow(unused)]
     server: Option<grpcio::Server>,
@@ -221,7 +221,6 @@ impl RaftServer {
                     return;
                 }
             };
-
             let task = request
                 .map(move |resp| {
                     if resp.vote_granted {
