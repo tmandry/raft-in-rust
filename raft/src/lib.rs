@@ -1,3 +1,6 @@
+#[macro_use]
+mod macros;
+
 pub(crate) mod protos;
 pub mod server;
 pub mod storage;

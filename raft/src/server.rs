@@ -152,12 +152,8 @@ impl RaftServer {
     fn reset_timeout(&mut self) {
         let weak_self = self.weak_self.clone();
         let guard = self.timer.schedule_with_delay(self.timeout, move || {
-            let server = weak_self.upgrade();
-            let mut this = match server {
-                Some(ref lock) => lock.lock().unwrap(),
-                None => return,
-            };
-            this.timeout();
+            upgrade_or_return!(weak_self);
+            weak_self.timeout();
         });
         self.scheduled_timeout = Some(guard);
     }
@@ -201,14 +197,9 @@ impl RaftServer {
 
             let task = request
                 .map(move |resp| {
-                    let server = weak_self.upgrade();
-                    let mut this = match server {
-                        Some(ref lock) => lock.lock().unwrap(),
-                        None => return,
-                    };
-
                     if resp.vote_granted {
-                        this.received_vote(resp.term);
+                        upgrade_or_return!(weak_self);
+                        weak_self.received_vote(resp.term);
                     }
                 })
                 .map_err(|e| {
