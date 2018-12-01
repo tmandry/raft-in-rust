@@ -4,6 +4,8 @@ use serde_json;
 use std::collections::BTreeMap;
 use std::sync::{Arc, RwLock};
 
+pub type Error = serde_json::Error;
+
 pub trait Storage {
     /// Returns whether an entry with index `log_index` and term `log_term`
     /// exists in the storage.
@@ -34,6 +36,8 @@ pub trait Storage {
     ///
     /// Entries cannot be rolled back after being applied.
     fn apply_up_to(&mut self, last_commit: LogIndex);
+
+    fn apply_one(&mut self) -> Result<Vec<u8>, Error>;
 }
 
 #[derive(Debug)]
@@ -141,9 +145,17 @@ impl<S: StateMachine> Storage for MemoryStorage<S> {
 
         self.last_applied = last_commit;
     }
+
+    fn apply_one(&mut self) -> Result<Vec<u8>, Error> {
+        assert!(self.last_applied < self.last_log_index());
+        let index = self.last_applied + 1;
+        let response = do_apply_with_response(&mut self.state, &self.log[&index].entry)?;
+        self.last_applied = index;
+        Ok(response)
+    }
 }
 
-fn do_apply<S: StateMachine>(state: &mut S, entry: &[u8]) -> Result<(), serde_json::Error> {
+fn do_apply<S: StateMachine>(state: &mut S, entry: &[u8]) -> Result<(), Error> {
     // FIXME: Currently we assume all commands and responses are assumed to
     // be encoded in JSON, eventually a Protocol trait is needed.
     let command: S::Command = serde_json::from_slice(&entry)?;
@@ -152,10 +164,7 @@ fn do_apply<S: StateMachine>(state: &mut S, entry: &[u8]) -> Result<(), serde_js
 }
 
 #[allow(unused)]
-fn do_apply_with_response<S: StateMachine>(
-    state: &mut S,
-    entry: &[u8],
-) -> Result<Vec<u8>, serde_json::Error> {
+fn do_apply_with_response<S: StateMachine>(state: &mut S, entry: &[u8]) -> Result<Vec<u8>, Error> {
     let command: S::Command = serde_json::from_slice(&entry)?;
     let response = state.apply(&command);
     Ok(serde_json::to_vec(&response)?)

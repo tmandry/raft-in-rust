@@ -133,7 +133,7 @@ pub struct RpcState {
     pub(crate) clients: BTreeMap<ServerId, RaftServiceClient>,
     env: Arc<Environment>,
     #[allow(unused)]
-    server: Option<grpcio::Server>,
+    pub(crate) server: Option<grpcio::Server>,
 }
 
 impl RpcState {
@@ -263,14 +263,14 @@ impl RaftServer {
         debug!("Received vote");
         self.state = RaftState::Candidate { num_votes };
 
-        if num_votes >= self.votes_required() {
+        if num_votes >= self.majority() {
             info!("Elected leader");
             self.scheduled_timeout = None;
             self.become_leader();
         }
     }
 
-    fn votes_required(&self) -> i32 {
+    pub(crate) fn majority(&self) -> i32 {
         (self.rpc.clients.len() as i32 + 2) / 2
     }
 }

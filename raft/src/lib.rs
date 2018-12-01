@@ -6,6 +6,8 @@ pub(crate) mod protos;
 pub mod server;
 pub mod storage;
 
+pub use self::leader::ApplyError;
+
 use crate::storage::Storage;
 use serde::{de::DeserializeOwned, Serialize};
 use std::cmp::min;
@@ -108,6 +110,19 @@ impl Peer {
         Ok(())
     }
 
+    pub(crate) fn append_local(&mut self, entries: Vec<Vec<u8>>) {
+        let mut storage = self.storage.write().unwrap();
+        let last_log_index = storage.last_log_index();
+        storage.append(entries, last_log_index, self.current_term);
+    }
+
+    pub(crate) fn apply_one(&mut self) -> Result<Vec<u8>, storage::Error> {
+        let mut storage = self.storage.write().unwrap();
+        let response = storage.apply_one()?;
+        self.last_commit += 1;
+        Ok(response)
+    }
+
     /// Process a vote request. Returns the whether or not the vote was granted.
     /// Also returns the current term.
     pub(crate) fn request_vote(&mut self, req: &VoteRequest) -> (bool, Term) {
@@ -130,7 +145,7 @@ impl Peer {
         return (true, self.current_term);
     }
 
-    fn update_commit(&mut self, leader_commit: LogIndex) {
+    pub(crate) fn update_commit(&mut self, leader_commit: LogIndex) {
         if self.last_commit >= leader_commit {
             return;
         }
