@@ -1,6 +1,7 @@
 #[macro_use]
 mod macros;
 
+mod leader;
 pub(crate) mod protos;
 pub mod server;
 pub mod storage;
@@ -145,7 +146,6 @@ impl Peer {
 
     fn saw_term(&mut self, term: Term) {
         if term > self.current_term {
-            // TODO convert to follower
             // TODO save current_term to persistent storage
             self.current_term = term;
             self.voted_for = None;

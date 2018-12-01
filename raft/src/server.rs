@@ -1,7 +1,9 @@
+use crate::leader::LeaderState;
 use crate::protos::raft as protos;
 use crate::protos::raft_grpc::{self, RaftService, RaftServiceClient};
 use crate::storage::Storage;
 use crate::{AppendEntries, Peer, ServerId, Term, VoteRequest};
+//use crate::macros::upgrade_or_return;
 
 use chrono::Duration;
 use futures::Future;
@@ -23,6 +25,7 @@ pub struct Config {
     pub endpoints: Endpoints,
     pub min_timeout_ms: i64,
     pub max_timeout_ms: i64,
+    pub heartbeat_frequency_ms: i64,
 }
 
 impl Config {
@@ -33,6 +36,7 @@ impl Config {
             // TODO read from config file
             min_timeout_ms: 1000,
             max_timeout_ms: 3000,
+            heartbeat_frequency_ms: 500,
         };
         let reader = BufReader::new(servers);
         for (index, endpoint) in reader.lines().enumerate() {
@@ -48,19 +52,24 @@ pub struct RaftServer {
     pub peer: Peer,
     pub storage: Arc<RwLock<dyn Storage + Send + Sync>>,
 
+    pub(crate) timer: Timer,
+
     timeout: Duration,
-    timer: Timer,
     scheduled_timeout: Option<timer::Guard>,
 
-    weak_self: Weak<Mutex<RaftServer>>,
+    /// The configured heartbeat frequency for when this server is the leader.
+    pub(crate) heartbeat_frequency: Duration,
 
-    state: RaftState,
+    /// Used for scheduling callbacks.
+    pub(crate) weak_self: Weak<Mutex<RaftServer>>,
+
+    pub(crate) state: RaftState,
 }
 
-enum RaftState {
+pub(crate) enum RaftState {
     Follower,
     Candidate { num_votes: i32 },
-    Leader,
+    Leader(LeaderState),
 }
 
 impl RaftServer {
@@ -73,7 +82,7 @@ impl RaftServer {
             .remove(&config.id)
             .expect("no server endpoint configured for my id!");
 
-        let timeout = chrono::Duration::milliseconds(
+        let timeout = Duration::milliseconds(
             rand::thread_rng().gen_range(config.min_timeout_ms, config.max_timeout_ms),
         );
         info!("Setting timeout to {}", timeout);
@@ -83,9 +92,12 @@ impl RaftServer {
             peer: Peer::new(storage.clone()),
             storage,
 
-            timeout,
             timer: Timer::new(),
+
             scheduled_timeout: None,
+            timeout,
+
+            heartbeat_frequency: Duration::milliseconds(config.heartbeat_frequency_ms),
 
             weak_self: Weak::new(),
 
@@ -104,6 +116,15 @@ impl RaftServer {
             })
             .unwrap();
         server
+    }
+
+    #[allow(unused)]
+    pub(crate) fn id(&self) -> ServerId {
+        self.rpc.id
+    }
+
+    pub(crate) fn other_server_ids(&self) -> impl Iterator<Item = &ServerId> {
+        self.rpc.clients.keys()
     }
 }
 
@@ -158,7 +179,8 @@ impl RaftServer {
         self.scheduled_timeout = Some(guard);
     }
 
-    pub fn timeout(&mut self) {
+    /// Starts an election to become the next leader.
+    fn timeout(&mut self) {
         self.state = RaftState::Candidate { num_votes: 1 }; // we're going to vote for ourselves.
         self.reset_timeout();
 
@@ -211,7 +233,8 @@ impl RaftServer {
 
     fn saw_term(&mut self, term: Term) {
         if term > self.peer.term() {
-            self.state = RaftState::Follower
+            info!("Saw term {}, now a follower", term);
+            self.state = RaftState::Follower;
         }
         self.peer.saw_term(term);
     }
@@ -237,7 +260,7 @@ impl RaftServer {
 
         if num_votes >= self.votes_required() {
             info!("Elected leader");
-            self.state = RaftState::Leader;
+            self.become_leader();
         }
     }
 
@@ -268,6 +291,7 @@ impl RaftService for Weak<Mutex<RaftServer>> {
             }
         };
 
+        this.saw_term(req.term);
         let (granted, term) = this.peer.request_vote(&VoteRequest {
             term: req.term,
             candidate_id: req.candidate,
@@ -306,6 +330,7 @@ impl RaftService for Weak<Mutex<RaftServer>> {
             }
         };
 
+        this.saw_term(req.term);
         let result = this.peer.append_entries(AppendEntries {
             term: req.term,
             leader_id: req.leader_id,
