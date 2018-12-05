@@ -141,8 +141,7 @@ impl Peer {
         }
 
         let last_log_term = self.storage.read().unwrap().last_log_term();
-        if req.last_log_term < last_log_term || req.last_log_index < self.last_commit
-        {
+        if req.last_log_term < last_log_term || req.last_log_index < self.last_commit {
             return (false, self.current_term);
         }
 
@@ -191,6 +190,7 @@ mod tests {
     use serde_json;
     use std::sync::Arc;
 
+    #[derive(Debug)]
     struct TestService(i64);
 
     impl Default for TestService {
@@ -301,6 +301,62 @@ mod tests {
         assert_eq!(0, storage.read().unwrap().len());
         assert!(peer.append_entries(valid_append(Increment)).is_ok());
         assert_eq!(1, storage.read().unwrap().len());
+    }
+
+    #[test]
+    fn append_entries_ignores_already_seen_entries() {
+        let (ref mut peer, ref mut storage) = valid_peer();
+
+        try_append(
+            AppendEntries {
+                term: START_TERM,
+                prev_log_index: None,
+                leader_commit: 1,
+                entries: entries(vec![Increment, Increment, Increment]),
+                ..valid_heartbeat()
+            },
+            peer,
+        );
+        assert_eq!(3, storage.read().unwrap().len());
+
+        // Repeat the middle entry.
+        try_append(
+            AppendEntries {
+                term: START_TERM,
+                prev_log_index: Some(1),
+                leader_commit: 1,
+                entries: entries(vec![Increment]),
+                ..valid_heartbeat()
+            },
+            peer,
+        );
+        assert_eq!(3, storage.read().unwrap().len());
+
+        // New term.
+        try_append(
+            AppendEntries {
+                term: START_TERM + 1,
+                prev_log_index: Some(3),
+                leader_commit: 3,
+                entries: entries(vec![Increment, Increment]),
+                ..valid_heartbeat()
+            },
+            peer,
+        );
+        assert_eq!(5, storage.read().unwrap().len());
+
+        // Repeat again from old term.
+        try_append(
+            AppendEntries {
+                term: START_TERM,
+                prev_log_index: Some(1),
+                leader_commit: 3,
+                entries: entries(vec![Increment]),
+                ..valid_heartbeat()
+            },
+            peer,
+        );
+        assert_eq!(5, storage.read().unwrap().len());
     }
 
     #[test]

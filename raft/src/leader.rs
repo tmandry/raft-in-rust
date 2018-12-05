@@ -163,14 +163,9 @@ impl RaftServer {
 
                             // Can immediately return the result, but have to keep the
                             // remaining futures alive.
-                            let remaining = future::join_all(rest)
-                                .map(|_| ())
-                                .map_err(|e| {
-                                    warn!(
-                                        "Error while sending append request (applied): {:?}",
-                                        e
-                                    );
-                                });
+                            let remaining = future::join_all(rest).map(|_| ()).map_err(|e| {
+                                warn!("Error while sending append request (applied): {:?}", e);
+                            });
                             server.rpc.clients.values().next().unwrap().spawn(remaining);
 
                             return result;

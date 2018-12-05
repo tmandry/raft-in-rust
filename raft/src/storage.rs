@@ -115,13 +115,32 @@ impl<S: StateMachine> Storage for MemoryStorage<S> {
             );
         }
 
-        // Remove everything that might conflict.
-        self.log.split_off(&start_index);
+        // Look for any entries that conflict (different term number).
+        // This should probably be optimized.
+        let indexes = start_index..(start_index + entries.len() as i64);
+        let mut first_conflict = None;
+        for idx in indexes.clone() {
+            if let Some(log_entry) = self.log.get(&idx) {
+                if log_entry.term != term {
+                    first_conflict = Some(idx);
+                    break;
+                }
+            }
+        }
 
-        let mut index = start_index;
-        for entry in entries.into_iter() {
-            self.log.insert(index, LogEntry { term, entry });
-            index += 1;
+        // Remove everything after the first conflict.
+        if let Some(conflict_index) = first_conflict {
+            self.log.split_off(&conflict_index);
+        }
+
+        for (index, entry) in indexes.zip(entries) {
+            let should_insert = match self.log.keys().last() {
+                None => true,
+                Some(last_index) => last_index < &index,
+            };
+            if should_insert {
+                self.log.insert(index, LogEntry { term, entry });
+            }
         }
     }
 
@@ -164,7 +183,6 @@ fn do_apply<S: StateMachine>(state: &mut S, entry: &[u8]) -> Result<(), Error> {
     Ok(())
 }
 
-#[allow(unused)]
 fn do_apply_with_response<S: StateMachine>(state: &mut S, entry: &[u8]) -> Result<Vec<u8>, Error> {
     let command: S::Command = serde_json::from_slice(&entry)?;
     let response = state.apply(&command);
