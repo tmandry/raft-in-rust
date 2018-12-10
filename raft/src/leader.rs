@@ -69,8 +69,11 @@ impl RaftServer {
                 }
             };
             let task = request
-                .map(|resp| {
-                    if !resp.success {
+                .map(move |resp| {
+                    upgrade_or_return!(server);
+                    let current_term = server.peer.current_term;
+                    server.saw_term(resp.term);
+                    if !resp.success && resp.term == current_term {
                         // TODO: retry failed requests due to log inconsistency
                         warn!("Log inconsistency detected, TODO retry");
                     }
