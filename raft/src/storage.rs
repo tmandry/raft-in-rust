@@ -11,6 +11,8 @@ pub trait Storage {
     /// exists in the storage.
     fn has_entry(&self, log_index: LogIndex, log_term: Term) -> bool;
 
+    fn get_entry(&self, log_index: LogIndex) -> Option<(Term, Vec<u8>)>;
+
     /// Returns the term of the last entry in the log (not necessarily applied).
     fn last_log_term(&self) -> Term;
 
@@ -88,6 +90,10 @@ impl<S: StateMachine> Storage for MemoryStorage<S> {
             None => false,
             Some(LogEntry { term, .. }) => *term == log_term,
         }
+    }
+
+    fn get_entry(&self, log_index: LogIndex) -> Option<(Term, Vec<u8>)> {
+        self.log.get(&log_index).map(|e| (e.term, e.entry.clone()))
     }
 
     fn last_log_term(&self) -> Term {

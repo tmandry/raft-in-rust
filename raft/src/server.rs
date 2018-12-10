@@ -156,7 +156,9 @@ impl RpcState {
 
     fn connect(&mut self, endpoints: Endpoints) {
         for (id, endpoint) in endpoints {
-            let ch = ChannelBuilder::new(self.env.clone()).connect(&endpoint);
+            let ch = ChannelBuilder::new(self.env.clone())
+                .max_reconnect_backoff(core::time::Duration::from_millis(3000)) // TODO config
+                .connect(&endpoint);
             let client = RaftServiceClient::new(ch);
             self.clients.insert(id, client);
         }
@@ -244,7 +246,7 @@ impl RaftServer {
         }
     }
 
-    fn saw_term(&mut self, term: Term) {
+    pub(crate) fn saw_term(&mut self, term: Term) {
         if term > self.peer.term() {
             info!("Saw term {}, now a follower", term);
             self.state = RaftState::Follower;
