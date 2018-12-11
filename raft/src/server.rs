@@ -17,6 +17,7 @@ use std::io::{BufRead, BufReader};
 use std::net::SocketAddr;
 use std::sync::{Arc, Mutex, RwLock, Weak};
 use timer::{self, Timer};
+use tokio::runtime::Runtime;
 
 pub type Endpoints = BTreeMap<ServerId, String>;
 
@@ -64,6 +65,7 @@ pub struct RaftServer {
 
     /// Used for scheduling callbacks.
     pub(crate) weak_self: Weak<Mutex<RaftServer>>,
+    pub(crate) runtime: Arc<Mutex<Runtime>>,
 
     pub(crate) state: RaftState,
 }
@@ -104,6 +106,7 @@ impl RaftServer {
             heartbeat_frequency: Duration::milliseconds(config.heartbeat_frequency_ms),
 
             weak_self: Weak::new(),
+            runtime: Arc::new(Mutex::new(Runtime::new().unwrap())),
 
             state: RaftState::Follower,
         }));

@@ -95,6 +95,12 @@ impl RaftServer {
                 .map_err(|e| {
                     warn!("Error received from heartbeat: {:?}", e);
                 });
+
+            // FIXME This is a bug waiting to happen.
+            //
+            // Technically it won't deadlock because we're calling this from the
+            // timer thread, but really we should just move everything to use
+            // ReentrantLock.
             client.spawn(task);
         }
 
@@ -216,7 +222,10 @@ impl RaftServer {
                             let remaining = future::join_all(rest).map(|_| ()).map_err(|e| {
                                 warn!("Error while sending append request (applied): {:?}", e);
                             });
-                            server.rpc.clients.values().next().unwrap().spawn(remaining);
+
+                            let runtime = server.runtime.clone();
+                            std::mem::drop(server);
+                            runtime.lock().unwrap().spawn(remaining);
 
                             return result;
                         }
@@ -322,7 +331,11 @@ impl RaftServer {
                         );
                         return Box::new(future::err(AppendRequestError::RetryUnsuccessful));
                     }
-                    trace!("retry_failed_append: success for index={}, moving to {}", index, target_index);
+                    trace!(
+                        "retry_failed_append: success for index={}, moving to {}",
+                        index,
+                        target_index
+                    );
 
                     upgrade_or_return!(serverr, Box::new(future::empty()));
                     let request = match serverr.build_retry_request(target_index) {
