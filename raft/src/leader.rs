@@ -281,6 +281,7 @@ impl RaftServer {
             return Box::new(future::err(AppendRequestError::RetryUnsuccessful));
         }
         let index = target_index - 1;
+        trace!("retry_failed_append: index={}", index);
 
         let request = match self.build_retry_request(index) {
             Ok(r) => r,
@@ -321,9 +322,10 @@ impl RaftServer {
                         );
                         return Box::new(future::err(AppendRequestError::RetryUnsuccessful));
                     }
+                    trace!("retry_failed_append: success for index={}, moving to {}", index, target_index);
 
                     upgrade_or_return!(serverr, Box::new(future::empty()));
-                    let request = match serverr.build_retry_request(index) {
+                    let request = match serverr.build_retry_request(target_index) {
                         Ok(r) => r,
                         Err(e) => return Box::new(future::err(e)),
                     };
@@ -332,7 +334,7 @@ impl RaftServer {
                         &request,
                         serverr.rpc.clients.get(&server_id).unwrap(),
                         server_id,
-                        index,
+                        target_index,
                         false,
                     ) {
                         Some(f) => f,
@@ -344,7 +346,7 @@ impl RaftServer {
                     if !resp.success {
                         error!(
                             "Failed retry to append server_id={} log_index={}",
-                            server_id, index
+                            server_id, target_index
                         );
                         return Err(AppendRequestError::RetryUnsuccessful);
                     }
