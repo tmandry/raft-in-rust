@@ -105,6 +105,8 @@ impl RaftServer {
         &mut self,
         entry: Vec<u8>,
     ) -> Box<dyn Future<Item = Vec<u8>, Error = ApplyError> + Send> {
+        let entry = (self.peer.current_term, entry);
+
         self.schedule_heartbeat();
 
         match self.state {
@@ -259,8 +261,7 @@ impl RaftServer {
         let storage = self.peer.storage.read().unwrap();
         let (term, entry) = Self::get_entry_for_retry(&storage, index)?;
 
-        let mut request = self.append_request(vec![entry]);
-        request.term = term;
+        let mut request = self.append_request(vec![(term, entry)]);
         if index == 1 {
             request.prev_log_index = 0;
             request.prev_log_term = 0;
@@ -367,7 +368,7 @@ impl RaftServer {
         ));
     }
 
-    fn append_request(&self, entries: Vec<Vec<u8>>) -> protos::AppendRequest {
+    fn append_request(&self, entries: Vec<(Term, Vec<u8>)>) -> protos::AppendRequest {
         let mut req = protos::AppendRequest::new();
         req.set_term(self.peer.current_term);
         req.set_leader_id(self.id());
@@ -380,7 +381,17 @@ impl RaftServer {
             })
             .unwrap();
         req.set_leader_commit(self.peer.last_commit);
-        req.set_entries(entries.into());
+        req.set_entries(
+            entries
+                .into_iter()
+                .map(|e| {
+                    let mut entry = protos::LogEntry::new();
+                    entry.term = e.0;
+                    entry.data = e.1;
+                    entry
+                })
+                .collect(),
+        );
         req
     }
 }

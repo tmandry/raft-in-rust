@@ -18,7 +18,12 @@ message AppendRequest {
   int64 prev_log_index = 3;
   int32 prev_log_term = 4;
   int64 leader_commit = 5;
-  repeated bytes entries = 6;
+  repeated LogEntry entries = 6;
+}
+
+message LogEntry {
+  int32 term = 1;
+  bytes data = 2;
 }
 
 message AppendResponse {

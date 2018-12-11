@@ -11,6 +11,7 @@ use grpcio::{self, ChannelBuilder, EnvBuilder, Environment, RpcContext, ServerBu
 use log::*;
 use rand::Rng;
 use std::collections::BTreeMap;
+use std::env;
 use std::fs::File;
 use std::io::{BufRead, BufReader};
 use std::net::SocketAddr;
@@ -30,12 +31,13 @@ pub struct Config {
 
 impl Config {
     pub fn new(servers: File, id: ServerId) -> Config {
+        let force_timeout = env::var("RAFT_FORCE_TIMEOUT").map(|x| x.parse::<i64>().unwrap());
         let mut conf = Config {
             id,
             endpoints: Default::default(),
             // TODO read from config file
-            min_timeout_ms: 600,
-            max_timeout_ms: 800,
+            min_timeout_ms: force_timeout.clone().unwrap_or(600),
+            max_timeout_ms: force_timeout.clone().unwrap_or(800),
             heartbeat_frequency_ms: 500,
         };
         let reader = BufReader::new(servers);
@@ -82,9 +84,11 @@ impl RaftServer {
             .remove(&config.id)
             .expect("no server endpoint configured for my id!");
 
-        let timeout = Duration::milliseconds(
-            rand::thread_rng().gen_range(config.min_timeout_ms, config.max_timeout_ms),
-        );
+        let timeout = Duration::milliseconds(if config.min_timeout_ms == config.max_timeout_ms {
+            config.min_timeout_ms
+        } else {
+            rand::thread_rng().gen_range(config.min_timeout_ms, config.max_timeout_ms)
+        });
         info!("Setting timeout to {}", timeout);
 
         let server = Arc::new(Mutex::new(RaftServer {
@@ -359,7 +363,7 @@ impl RaftService for Weak<Mutex<RaftServer>> {
             },
             prev_log_term: req.prev_log_term,
             leader_commit: req.leader_commit,
-            entries: req.entries.into_vec(),
+            entries: req.entries.into_iter().map(|e| (e.term, e.data)).collect(),
         });
         trace!("append_entries() returned {:?}", result);
 

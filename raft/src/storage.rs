@@ -32,7 +32,7 @@ pub trait Storage {
     /// If `start_index` or further entries already exist, erase them and
     /// replace with the supplied entries. This cannot be used to erase entries
     /// that are already applied.
-    fn append(&mut self, entries: Vec<Vec<u8>>, start_index: LogIndex, term: Term);
+    fn append(&mut self, entries: Vec<(Term, Vec<u8>)>, start_index: LogIndex);
 
     /// Applies all entries up to and including `last_commit`.
     ///
@@ -112,7 +112,7 @@ impl<S: StateMachine> Storage for MemoryStorage<S> {
         self.log.len()
     }
 
-    fn append(&mut self, entries: Vec<Vec<u8>>, start_index: LogIndex, term: Term) {
+    fn append(&mut self, entries: Vec<(Term, Vec<u8>)>, start_index: LogIndex) {
         if start_index > 1 && self.last_log_index() < (start_index - 1) {
             panic!(
                 "MemoryStorage::append called with start_index {} and last_log_index {}",
@@ -125,9 +125,9 @@ impl<S: StateMachine> Storage for MemoryStorage<S> {
         // This should probably be optimized.
         let indexes = start_index..(start_index + entries.len() as i64);
         let mut first_conflict = None;
-        for idx in indexes.clone() {
+        for (idx, (term, _)) in indexes.clone().zip(&entries) {
             if let Some(log_entry) = self.log.get(&idx) {
-                if log_entry.term != term {
+                if log_entry.term != *term {
                     first_conflict = Some(idx);
                     break;
                 }
@@ -139,7 +139,7 @@ impl<S: StateMachine> Storage for MemoryStorage<S> {
             self.log.split_off(&conflict_index);
         }
 
-        for (index, entry) in indexes.zip(entries) {
+        for (index, (term, entry)) in indexes.zip(entries) {
             let should_insert = match self.log.keys().last() {
                 None => true,
                 Some(last_index) => last_index < &index,

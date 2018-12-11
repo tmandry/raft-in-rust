@@ -51,7 +51,7 @@ pub(crate) struct AppendEntries {
     leader_id: ServerId,
     prev_log_index: Option<LogIndex>,
     prev_log_term: Term,
-    entries: Vec<Vec<u8>>,
+    entries: Vec<(Term, Vec<u8>)>,
     leader_commit: LogIndex,
 }
 
@@ -101,21 +101,17 @@ impl Peer {
                 }
             }
 
-            storage.append(
-                request.entries,
-                request.prev_log_index.unwrap_or(0) + 1,
-                request.term,
-            );
+            storage.append(request.entries, request.prev_log_index.unwrap_or(0) + 1);
         }
 
         self.update_commit(request.leader_commit);
         Ok(())
     }
 
-    pub(crate) fn append_local(&mut self, entries: Vec<Vec<u8>>) {
+    pub(crate) fn append_local(&mut self, entries: Vec<(Term, Vec<u8>)>) {
         let mut storage = self.storage.write().unwrap();
         let last_log_index = storage.last_log_index();
-        storage.append(entries, last_log_index + 1, self.current_term);
+        storage.append(entries, last_log_index + 1);
     }
 
     pub(crate) fn apply_one(&mut self) -> Result<Vec<u8>, storage::Error> {
@@ -274,16 +270,16 @@ mod tests {
         );
     }
 
-    fn valid_append(c: Command) -> AppendEntries {
+    fn valid_append(t: Term, c: Command) -> AppendEntries {
         AppendEntries {
-            entries: entries(vec![c]),
+            entries: entries(vec![(t, c)]),
             ..valid_heartbeat()
         }
     }
 
-    fn entries(cs: Vec<Command>) -> Vec<Vec<u8>> {
+    fn entries(cs: Vec<(Term, Command)>) -> Vec<(Term, Vec<u8>)> {
         cs.into_iter()
-            .map(|c| serde_json::to_vec(&c).expect("could not serialize"))
+            .map(|(t, c)| (t, serde_json::to_vec(&c).expect("could not serialize")))
             .collect()
     }
 
@@ -299,7 +295,9 @@ mod tests {
     fn append_entries_appends_to_log_with_valid_request() {
         let (mut peer, storage) = valid_peer();
         assert_eq!(0, storage.read().unwrap().len());
-        assert!(peer.append_entries(valid_append(Increment)).is_ok());
+        assert!(peer
+            .append_entries(valid_append(START_TERM, Increment))
+            .is_ok());
         assert_eq!(1, storage.read().unwrap().len());
     }
 
@@ -312,7 +310,11 @@ mod tests {
                 term: START_TERM,
                 prev_log_index: None,
                 leader_commit: 1,
-                entries: entries(vec![Increment, Increment, Increment]),
+                entries: entries(vec![
+                    (START_TERM, Increment),
+                    (START_TERM, Increment),
+                    (START_TERM, Increment),
+                ]),
                 ..valid_heartbeat()
             },
             peer,
@@ -325,7 +327,7 @@ mod tests {
                 term: START_TERM,
                 prev_log_index: Some(1),
                 leader_commit: 1,
-                entries: entries(vec![Increment]),
+                entries: entries(vec![(START_TERM, Increment)]),
                 ..valid_heartbeat()
             },
             peer,
@@ -338,7 +340,10 @@ mod tests {
                 term: START_TERM + 1,
                 prev_log_index: Some(3),
                 leader_commit: 3,
-                entries: entries(vec![Increment, Increment]),
+                entries: entries(vec![
+                    (START_TERM + 1, Increment),
+                    (START_TERM + 1, Increment),
+                ]),
                 ..valid_heartbeat()
             },
             peer,
@@ -351,7 +356,7 @@ mod tests {
                 term: START_TERM,
                 prev_log_index: Some(1),
                 leader_commit: 3,
-                entries: entries(vec![Increment]),
+                entries: entries(vec![(START_TERM, Increment)]),
                 ..valid_heartbeat()
             },
             peer,
@@ -384,19 +389,19 @@ mod tests {
 
         let (ref mut peer, ref mut storage) = valid_peer();
 
-        send_with_commit(0, valid_append(Increment), peer, storage);
-        send_with_commit(0, valid_append(Increment), peer, storage);
+        send_with_commit(0, valid_append(START_TERM, Increment), peer, storage);
+        send_with_commit(0, valid_append(START_TERM, Increment), peer, storage);
 
         // No entries have been committed yet.
         assert_eq!(0, storage.read().unwrap().state.0);
 
-        send_with_commit(1, valid_append(Increment), peer, storage);
+        send_with_commit(1, valid_append(START_TERM, Increment), peer, storage);
         assert_eq!(1, storage.read().unwrap().state.0);
         send_with_commit(1, valid_heartbeat(), peer, storage);
         assert_eq!(1, storage.read().unwrap().state.0);
         send_with_commit(2, valid_heartbeat(), peer, storage);
         assert_eq!(2, storage.read().unwrap().state.0);
-        send_with_commit(4, valid_append(Increment), peer, storage);
+        send_with_commit(4, valid_append(START_TERM, Increment), peer, storage);
         assert_eq!(4, storage.read().unwrap().state.0);
     }
 
@@ -410,7 +415,7 @@ mod tests {
                     term: START_TERM,
                     leader_commit: 0,
                     prev_log_index: if i > 0 { Some(i) } else { None },
-                    ..valid_append(Increment)
+                    ..valid_append(START_TERM, Increment)
                 },
                 peer,
             );
@@ -449,7 +454,7 @@ mod tests {
                 term: START_TERM + 2,
                 leader_commit: 7,
                 prev_log_index: Some(6),
-                ..valid_append(Double)
+                ..valid_append(START_TERM + 2, Double)
             },
             peer,
         );
@@ -464,7 +469,11 @@ mod tests {
             AppendEntries {
                 prev_log_index: None,
                 leader_commit: 1,
-                entries: entries(vec![Increment, Increment, Increment]),
+                entries: entries(vec![
+                    (START_TERM, Increment),
+                    (START_TERM, Increment),
+                    (START_TERM, Increment),
+                ]),
                 ..valid_heartbeat()
             },
             peer,
