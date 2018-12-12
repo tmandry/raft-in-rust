@@ -94,7 +94,7 @@ impl RaftServer {
         info!("Setting timeout to {}", timeout);
 
         let server = Arc::new(Mutex::new(RaftServer {
-            rpc: RpcState::new(config.id),
+            rpc: RpcState::new(config.id, endpoints),
             peer: Peer::new(storage.clone()),
             storage,
 
@@ -114,7 +114,7 @@ impl RaftServer {
         server
             .lock()
             .map(|mut this| {
-                this.rpc.connect(endpoints);
+                this.rpc.connect_all();
                 let weak_server = Arc::downgrade(&server);
                 this.rpc.create_rpc_server(my_endpoint, weak_server.clone());
 
@@ -144,31 +144,42 @@ impl RaftServer {
 
 pub struct RpcState {
     id: ServerId,
+    endpoints: Endpoints,
     pub(crate) clients: BTreeMap<ServerId, RaftServiceClient>,
     env: Arc<Environment>,
-    #[allow(unused)]
     pub(crate) server: Option<grpcio::Server>,
 }
 
 impl RpcState {
-    pub(crate) fn new(id: ServerId) -> Self {
+    pub(crate) fn new(id: ServerId, endpoints: Endpoints) -> Self {
         let env = Arc::new(EnvBuilder::new().build());
         RpcState {
-            id: id,
+            id,
+            endpoints,
             clients: Default::default(),
             env,
             server: None, //Self::create_server(my_endpoint, env, peer),
         }
     }
 
-    fn connect(&mut self, endpoints: Endpoints) {
-        for (id, endpoint) in endpoints {
-            let ch = ChannelBuilder::new(self.env.clone())
-                .max_reconnect_backoff(core::time::Duration::from_millis(3000)) // TODO config
-                .connect(&endpoint);
-            let client = RaftServiceClient::new(ch);
-            self.clients.insert(id, client);
+    fn connect_endpoint(&self, endpoint: &str) -> RaftServiceClient {
+        let ch = ChannelBuilder::new(self.env.clone())
+            .load_balancing_policy(grpcio::LbPolicy::PickFirst)
+            .max_reconnect_backoff(core::time::Duration::from_millis(3000)) // TODO config
+            .connect(&endpoint);
+        RaftServiceClient::new(ch)
+    }
+
+    fn connect_all(&mut self) {
+        for (id, endpoint) in &self.endpoints {
+            self.clients.insert(*id, self.connect_endpoint(endpoint));
         }
+    }
+
+    pub(crate) fn reconnect_client(&mut self, id: ServerId) {
+        self.clients.remove(&id);
+        self.clients
+            .insert(id, self.connect_endpoint(&self.endpoints[&id]));
     }
 
     fn create_rpc_server(&mut self, endpoint: String, raft_server: Weak<Mutex<RaftServer>>) {

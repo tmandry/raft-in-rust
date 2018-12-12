@@ -22,6 +22,7 @@ pub(crate) struct LeaderState {
     #[allow(unused)]
     match_index: BTreeMap<ServerId, LogIndex>,
     next_heartbeat: Option<timer::Guard>,
+    ticks_since_response: BTreeMap<ServerId, i32>,
 }
 
 #[derive(Debug)]
@@ -59,22 +60,33 @@ impl RaftServer {
             next_index,
             match_index,
             next_heartbeat: None,
+            ticks_since_response: Default::default(),
         });
 
         self.heartbeat();
     }
 
     fn heartbeat(&mut self) {
-        let _state = match &mut self.state {
+        debug!("Sending heartbeat");
+        let req = self.append_request(vec![]);
+
+        let state = match &mut self.state {
             RaftState::Leader(inner) => inner,
             _ => return,
         };
 
-        debug!("Sending heartbeat");
+        let mut reconnect = vec![];
+        for (id, client) in self.rpc.clients.iter() {
+            *state.ticks_since_response.entry(*id).or_insert(0) += 1;
+            // TODO: config
+            if state.ticks_since_response[id] >= 5 {
+                error!("Reconnecting to {}", id);
+                reconnect.push(*id);
+                state.ticks_since_response.insert(*id, 0);
+            }
 
-        let req = self.append_request(vec![]);
-        for client in self.rpc.clients.values() {
             let server = self.weak_self.clone();
+            let id = *id;
             let request = match client.append_entries_async(&req) {
                 Ok(x) => x,
                 Err(e) => {
@@ -85,6 +97,13 @@ impl RaftServer {
             let task = request
                 .map(move |resp| {
                     upgrade_or_return!(server);
+
+                    let state = match &mut server.state {
+                        RaftState::Leader(inner) => inner,
+                        _ => return,
+                    };
+                    state.ticks_since_response.insert(id, 0);
+
                     let current_term = server.peer.current_term;
                     server.saw_term(resp.term);
                     if !resp.success && resp.term == current_term {
@@ -104,7 +123,26 @@ impl RaftServer {
             client.spawn(task);
         }
 
+        for id in reconnect {
+            self.rpc.reconnect_client(id);
+        }
+
         self.schedule_heartbeat();
+    }
+
+    fn schedule_heartbeat(&mut self) {
+        let state = match &mut self.state {
+            RaftState::Leader(inner) => inner,
+            _ => return,
+        };
+        let server = self.weak_self.clone();
+        state.next_heartbeat = Some(self.timer.schedule_with_delay(
+            self.heartbeat_frequency,
+            move || {
+                upgrade_or_return!(server);
+                server.heartbeat();
+            },
+        ));
     }
 
     pub fn apply_one(
@@ -366,21 +404,6 @@ impl RaftServer {
                     Ok((server_id, resp))
                 }),
         )
-    }
-
-    fn schedule_heartbeat(&mut self) {
-        let state = match &mut self.state {
-            RaftState::Leader(inner) => inner,
-            _ => return,
-        };
-        let server = self.weak_self.clone();
-        state.next_heartbeat = Some(self.timer.schedule_with_delay(
-            self.heartbeat_frequency,
-            move || {
-                upgrade_or_return!(server);
-                server.heartbeat();
-            },
-        ));
     }
 
     fn append_request(&self, entries: Vec<(Term, Vec<u8>)>) -> protos::AppendRequest {
