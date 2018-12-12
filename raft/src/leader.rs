@@ -87,6 +87,7 @@ impl RaftServer {
 
             let server = self.weak_self.clone();
             let id = *id;
+            let prev_log_index = req.prev_log_index;
             let request = match client.append_entries_async(&req) {
                 Ok(x) => x,
                 Err(e) => {
@@ -95,22 +96,29 @@ impl RaftServer {
                 }
             };
             let task = request
-                .map(move |resp| {
-                    upgrade_or_return!(server);
+                .map_err(|e| AppendRequestError::RpcError(e))
+                .and_then(
+                    move |resp| -> Box<Future<Item = (), Error = AppendRequestError> + Send> {
+                        upgrade_or_return!(server, Box::new(future::empty()));
 
-                    let state = match &mut server.state {
-                        RaftState::Leader(inner) => inner,
-                        _ => return,
-                    };
-                    state.ticks_since_response.insert(id, 0);
+                        let state = match &mut server.state {
+                            RaftState::Leader(inner) => inner,
+                            _ => return Box::new(future::empty()),
+                        };
+                        state.ticks_since_response.insert(id, 0);
 
-                    let current_term = server.peer.current_term;
-                    server.saw_term(resp.term);
-                    if !resp.success && resp.term == current_term {
-                        // TODO: retry failed requests due to log inconsistency
-                        warn!("Log inconsistency detected, TODO retry");
-                    }
-                })
+                        let current_term = server.peer.current_term;
+                        server.saw_term(resp.term);
+                        if !resp.success && resp.term == current_term {
+                            info!("Catching up server {}", id);
+                            return Box::new(
+                                server.retry_failed_append(prev_log_index, id).map(|_| ()),
+                            );
+                        }
+
+                        Box::new(future::ok(()))
+                    },
+                )
                 .map_err(|e| {
                     warn!("Error received from heartbeat: {:?}", e);
                 });
