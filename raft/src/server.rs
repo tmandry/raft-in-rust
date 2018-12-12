@@ -355,7 +355,7 @@ impl RaftService for Weak<Mutex<RaftServer>> {
         req: protos::AppendRequest,
         sink: UnarySink<protos::AppendResponse>,
     ) {
-        debug!("Got append request from {}", req.leader_id);
+        trace!("Got append request from {}", req.leader_id);
 
         let lock = self.upgrade();
         let mut this = match lock {
@@ -367,6 +367,7 @@ impl RaftService for Weak<Mutex<RaftServer>> {
         };
 
         this.saw_term(req.term);
+        let num_entries = req.entries.len();
         let result = this.peer.append_entries(AppendEntries {
             term: req.term,
             leader_id: req.leader_id,
@@ -379,7 +380,7 @@ impl RaftService for Weak<Mutex<RaftServer>> {
             leader_commit: req.leader_commit,
             entries: req.entries.into_iter().map(|e| (e.term, e.data)).collect(),
         });
-        trace!("append_entries() returned {:?}", result);
+        debug!("Append request from {} with {} entries returning {:?}", req.leader_id, num_entries, result);
 
         use crate::AppendEntriesError::*;
         match result {

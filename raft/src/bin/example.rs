@@ -12,6 +12,7 @@ use std::str;
 mod sm {
     use raft::StateMachine;
     use serde_derive::{Deserialize, Serialize};
+    use log::*;
 
     #[derive(Debug)]
     pub struct TestService(i64);
@@ -36,13 +37,13 @@ mod sm {
             match command {
                 Command::Increment => {
                     self.0 += 1;
-                    self.0
                 }
                 Command::Double => {
                     self.0 *= 2;
-                    self.0
                 }
             }
+            debug!("state = {}", self.0);
+            self.0
         }
     }
 }
@@ -70,7 +71,6 @@ fn main() -> std::io::Result<()> {
                 let task = server.apply_one(command).then(|result| {
                     let result = result.map(|reply| str::from_utf8(&reply).unwrap().to_owned());
                     info!("Result after apply: {:?}", result);
-                    println!("Result after apply: {:?}", result);
                     Ok(())
                 });
                 server.spawn(task);

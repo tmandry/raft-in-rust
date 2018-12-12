@@ -80,7 +80,7 @@ impl RaftServer {
             *state.ticks_since_response.entry(*id).or_insert(0) += 1;
             // TODO: config
             if state.ticks_since_response[id] >= 5 {
-                error!("Reconnecting to {}", id);
+                warn!("Reconnecting to {}", id);
                 reconnect.push(*id);
                 state.ticks_since_response.insert(*id, 0);
             }
