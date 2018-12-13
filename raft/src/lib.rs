@@ -1,14 +1,21 @@
+#[macro_use]
+mod macros;
+
+mod leader;
 pub(crate) mod protos;
 pub mod server;
 pub mod storage;
 
+pub use self::leader::ApplyError;
+
 use crate::storage::Storage;
+use log::*;
 use serde::{de::DeserializeOwned, Serialize};
 use std::cmp::min;
 use std::fmt::Debug;
 use std::sync::{Arc, RwLock};
 
-pub trait StateMachine: Default + Send + Sync {
+pub trait StateMachine: Default + Send + Sync + Debug {
     type Command: Serialize + DeserializeOwned + Clone + Debug;
     type Response: Serialize + DeserializeOwned + Clone + Debug;
 
@@ -44,11 +51,19 @@ pub(crate) struct AppendEntries {
     leader_id: ServerId,
     prev_log_index: Option<LogIndex>,
     prev_log_term: Term,
-    entries: Vec<Vec<u8>>,
+    entries: Vec<(Term, Vec<u8>)>,
     leader_commit: LogIndex,
 }
 
+/// Reasons why append_entries can fail.
+#[derive(Debug, PartialEq)]
+pub(crate) enum AppendEntriesError {
+    BadTerm,
+    NeedBackfill,
+}
+
 /// Invoked by candidates seeking election.
+#[derive(Debug)]
 pub(crate) struct VoteRequest {
     term: Term,
     candidate_id: ServerId,
@@ -68,9 +83,13 @@ impl Peer {
 
     /// Attempt to append the supplied entries to the log (see
     /// [`AppendEntries`].) Returns true on success.
-    pub(crate) fn append_entries(&mut self, request: AppendEntries) -> bool {
+    pub(crate) fn append_entries(
+        &mut self,
+        request: AppendEntries,
+    ) -> Result<(), AppendEntriesError> {
+        trace!("append_entries({:?})", request);
         if request.term < self.current_term {
-            return false;
+            return Err(AppendEntriesError::BadTerm);
         }
         self.saw_term(request.term);
 
@@ -78,46 +97,61 @@ impl Peer {
             let mut storage = self.storage.write().unwrap();
             if let Some(prev_log_index) = request.prev_log_index {
                 if !storage.has_entry(prev_log_index, request.prev_log_term) {
-                    return false;
+                    return Err(AppendEntriesError::NeedBackfill);
                 }
             }
 
-            storage.append(
-                request.entries,
-                request.prev_log_index.unwrap_or(0) + 1,
-                request.term,
-            );
+            storage.append(request.entries, request.prev_log_index.unwrap_or(0) + 1);
         }
 
         self.update_commit(request.leader_commit);
-        true
+        Ok(())
+    }
+
+    pub(crate) fn append_local(&mut self, entries: Vec<(Term, Vec<u8>)>) {
+        let mut storage = self.storage.write().unwrap();
+        let last_log_index = storage.last_log_index();
+        storage.append(entries, last_log_index + 1);
+    }
+
+    pub(crate) fn apply_one(&mut self) -> Result<Vec<u8>, storage::Error> {
+        let mut storage = self.storage.write().unwrap();
+        let response = storage.apply_one()?;
+        self.last_commit += 1;
+        Ok(response)
     }
 
     /// Process a vote request. Returns the whether or not the vote was granted.
     /// Also returns the current term.
     pub(crate) fn request_vote(&mut self, req: &VoteRequest) -> (bool, Term) {
-        let current_term = self.current_term;
-
-        if req.term < current_term {
-            return (false, current_term);
+        trace!(
+            "request_vote({:?}, current_term={}, voted_for={:?}, last_commit={}, last_log_term={}",
+            req,
+            self.current_term,
+            self.voted_for,
+            self.last_commit,
+            self.storage.read().unwrap().last_log_term()
+        );
+        if req.term < self.current_term {
+            return (false, self.current_term);
         }
-        self.saw_term(req.term);
 
         let last_log_term = self.storage.read().unwrap().last_log_term();
-        if self.voted_for.is_some()
-            || req.last_log_term < last_log_term
-            || req.last_log_index < self.last_commit
-        {
-            return (false, current_term);
+        if req.last_log_term < last_log_term || req.last_log_index < self.last_commit {
+            return (false, self.current_term);
+        }
+
+        self.saw_term(req.term);
+        if self.voted_for.is_some() {
+            return (false, self.current_term);
         }
 
         // TODO persist on stable storage before responding
         self.voted_for = Some(req.candidate_id);
-
-        return (true, current_term);
+        return (true, self.current_term);
     }
 
-    fn update_commit(&mut self, leader_commit: LogIndex) {
+    pub(crate) fn update_commit(&mut self, leader_commit: LogIndex) {
         if self.last_commit >= leader_commit {
             return;
         }
@@ -133,11 +167,14 @@ impl Peer {
 
     fn saw_term(&mut self, term: Term) {
         if term > self.current_term {
-            // TODO convert to follower
             // TODO save current_term to persistent storage
             self.current_term = term;
             self.voted_for = None;
         }
+    }
+
+    pub(crate) fn term(&self) -> Term {
+        self.current_term
     }
 }
 
@@ -149,6 +186,7 @@ mod tests {
     use serde_json;
     use std::sync::Arc;
 
+    #[derive(Debug)]
     struct TestService(i64);
 
     impl Default for TestService {
@@ -205,14 +243,14 @@ mod tests {
     #[test]
     fn append_entries_succeeds_with_valid_request() {
         let (mut peer, _) = valid_peer();
-        assert_eq!(true, peer.append_entries(valid_heartbeat()));
+        assert!(peer.append_entries(valid_heartbeat()).is_ok());
     }
 
     #[test]
     fn append_entries_fails_with_unknown_log_index() {
         let (mut peer, _) = valid_peer();
         assert_eq!(
-            false,
+            Err(AppendEntriesError::NeedBackfill),
             peer.append_entries(AppendEntries {
                 prev_log_index: Some(5),
                 ..valid_heartbeat()
@@ -224,7 +262,7 @@ mod tests {
     fn append_entries_fails_with_old_term() {
         let (mut peer, _) = valid_peer();
         assert_eq!(
-            false,
+            Err(AppendEntriesError::BadTerm),
             peer.append_entries(AppendEntries {
                 term: 1,
                 ..valid_heartbeat()
@@ -232,21 +270,21 @@ mod tests {
         );
     }
 
-    fn valid_append(c: Command) -> AppendEntries {
+    fn valid_append(t: Term, c: Command) -> AppendEntries {
         AppendEntries {
-            entries: entries(vec![c]),
+            entries: entries(vec![(t, c)]),
             ..valid_heartbeat()
         }
     }
 
-    fn entries(cs: Vec<Command>) -> Vec<Vec<u8>> {
+    fn entries(cs: Vec<(Term, Command)>) -> Vec<(Term, Vec<u8>)> {
         cs.into_iter()
-            .map(|c| serde_json::to_vec(&c).expect("could not serialize"))
+            .map(|(t, c)| (t, serde_json::to_vec(&c).expect("could not serialize")))
             .collect()
     }
 
     fn try_append(request: AppendEntries, peer: &mut Peer) -> bool {
-        if !peer.append_entries(request.clone()) {
+        if !peer.append_entries(request.clone()).is_ok() {
             println!("Request failed: {:#?}", request);
             return false;
         }
@@ -257,8 +295,73 @@ mod tests {
     fn append_entries_appends_to_log_with_valid_request() {
         let (mut peer, storage) = valid_peer();
         assert_eq!(0, storage.read().unwrap().len());
-        assert_eq!(true, peer.append_entries(valid_append(Increment)));
+        assert!(peer
+            .append_entries(valid_append(START_TERM, Increment))
+            .is_ok());
         assert_eq!(1, storage.read().unwrap().len());
+    }
+
+    #[test]
+    fn append_entries_ignores_already_seen_entries() {
+        let (ref mut peer, ref mut storage) = valid_peer();
+
+        try_append(
+            AppendEntries {
+                term: START_TERM,
+                prev_log_index: None,
+                leader_commit: 1,
+                entries: entries(vec![
+                    (START_TERM, Increment),
+                    (START_TERM, Increment),
+                    (START_TERM, Increment),
+                ]),
+                ..valid_heartbeat()
+            },
+            peer,
+        );
+        assert_eq!(3, storage.read().unwrap().len());
+
+        // Repeat the middle entry.
+        try_append(
+            AppendEntries {
+                term: START_TERM,
+                prev_log_index: Some(1),
+                leader_commit: 1,
+                entries: entries(vec![(START_TERM, Increment)]),
+                ..valid_heartbeat()
+            },
+            peer,
+        );
+        assert_eq!(3, storage.read().unwrap().len());
+
+        // New term.
+        try_append(
+            AppendEntries {
+                term: START_TERM + 1,
+                prev_log_index: Some(3),
+                leader_commit: 3,
+                entries: entries(vec![
+                    (START_TERM + 1, Increment),
+                    (START_TERM + 1, Increment),
+                ]),
+                ..valid_heartbeat()
+            },
+            peer,
+        );
+        assert_eq!(5, storage.read().unwrap().len());
+
+        // Repeat again from old term.
+        try_append(
+            AppendEntries {
+                term: START_TERM,
+                prev_log_index: Some(1),
+                leader_commit: 3,
+                entries: entries(vec![(START_TERM, Increment)]),
+                ..valid_heartbeat()
+            },
+            peer,
+        );
+        assert_eq!(5, storage.read().unwrap().len());
     }
 
     #[test]
@@ -286,19 +389,19 @@ mod tests {
 
         let (ref mut peer, ref mut storage) = valid_peer();
 
-        send_with_commit(0, valid_append(Increment), peer, storage);
-        send_with_commit(0, valid_append(Increment), peer, storage);
+        send_with_commit(0, valid_append(START_TERM, Increment), peer, storage);
+        send_with_commit(0, valid_append(START_TERM, Increment), peer, storage);
 
         // No entries have been committed yet.
         assert_eq!(0, storage.read().unwrap().state.0);
 
-        send_with_commit(1, valid_append(Increment), peer, storage);
+        send_with_commit(1, valid_append(START_TERM, Increment), peer, storage);
         assert_eq!(1, storage.read().unwrap().state.0);
         send_with_commit(1, valid_heartbeat(), peer, storage);
         assert_eq!(1, storage.read().unwrap().state.0);
         send_with_commit(2, valid_heartbeat(), peer, storage);
         assert_eq!(2, storage.read().unwrap().state.0);
-        send_with_commit(4, valid_append(Increment), peer, storage);
+        send_with_commit(4, valid_append(START_TERM, Increment), peer, storage);
         assert_eq!(4, storage.read().unwrap().state.0);
     }
 
@@ -312,7 +415,7 @@ mod tests {
                     term: START_TERM,
                     leader_commit: 0,
                     prev_log_index: if i > 0 { Some(i) } else { None },
-                    ..valid_append(Increment)
+                    ..valid_append(START_TERM, Increment)
                 },
                 peer,
             );
@@ -351,7 +454,7 @@ mod tests {
                 term: START_TERM + 2,
                 leader_commit: 7,
                 prev_log_index: Some(6),
-                ..valid_append(Double)
+                ..valid_append(START_TERM + 2, Double)
             },
             peer,
         );
@@ -366,7 +469,11 @@ mod tests {
             AppendEntries {
                 prev_log_index: None,
                 leader_commit: 1,
-                entries: entries(vec![Increment, Increment, Increment]),
+                entries: entries(vec![
+                    (START_TERM, Increment),
+                    (START_TERM, Increment),
+                    (START_TERM, Increment),
+                ]),
                 ..valid_heartbeat()
             },
             peer,

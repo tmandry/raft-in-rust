@@ -2,6 +2,7 @@ use raft::StateMachine;
 use serde_derive::{Deserialize, Serialize};
 use std::cmp::{max, min};
 
+#[derive(Debug)]
 struct NumberService {
     last: Option<u64>,
 }

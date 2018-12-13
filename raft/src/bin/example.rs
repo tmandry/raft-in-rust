@@ -1,14 +1,20 @@
 use raft::server::{Config, RaftServer};
 use raft::storage::MemoryStorage;
+
+use futures::Future;
+use log::*;
+use serde_json;
 use std::env;
 use std::fs::File;
-use std::thread::sleep;
-use std::time::Duration;
+use std::io;
+use std::str;
 
 mod sm {
+    use log::*;
     use raft::StateMachine;
     use serde_derive::{Deserialize, Serialize};
 
+    #[derive(Debug)]
     pub struct TestService(i64);
 
     impl Default for TestService {
@@ -31,13 +37,13 @@ mod sm {
             match command {
                 Command::Increment => {
                     self.0 += 1;
-                    self.0
                 }
                 Command::Double => {
                     self.0 *= 2;
-                    self.0
                 }
             }
+            debug!("state = {}", self.0);
+            self.0
         }
     }
 }
@@ -56,7 +62,22 @@ fn main() -> std::io::Result<()> {
     let storage = MemoryStorage::<sm::TestService>::new();
     let server = RaftServer::new(storage, config);
 
-    sleep(Duration::from_millis((id as u64 + 2) * 100));
-    server.lock().unwrap().timeout();
-    Ok(())
+    loop {
+        let mut input = String::new();
+        match io::stdin().read_line(&mut input) {
+            Ok(_) => {
+                let mut server = server.lock().unwrap();
+                let command = serde_json::to_vec(&sm::Command::Increment).unwrap();
+                let task = server.apply_one(command).then(|result| {
+                    let result = result.map(|reply| str::from_utf8(&reply).unwrap().to_owned());
+                    info!("Result after apply: {:?}", result);
+                    Ok(())
+                });
+                server.spawn(task);
+            }
+            Err(e) => {
+                warn!("Error while reading from stdin: {:?}", e);
+            }
+        }
+    }
 }
