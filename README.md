@@ -24,3 +24,5 @@ env RUST_LOG=raft=debug,example=debug cargo run 0
 ```
 
 You can see who the leader is by looking for "Sending heartbeat" messages. Go to that terminal and press enter to apply a change to the state machine. You should see a response in your terminal.
+
+![Raft screenshot](/doc/screenshot.png?raw=true)
