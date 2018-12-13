@@ -10,9 +10,9 @@ use std::io;
 use std::str;
 
 mod sm {
+    use log::*;
     use raft::StateMachine;
     use serde_derive::{Deserialize, Serialize};
-    use log::*;
 
     #[derive(Debug)]
     pub struct TestService(i64);

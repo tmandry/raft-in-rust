@@ -380,7 +380,10 @@ impl RaftService for Weak<Mutex<RaftServer>> {
             leader_commit: req.leader_commit,
             entries: req.entries.into_iter().map(|e| (e.term, e.data)).collect(),
         });
-        debug!("Append request from {} with {} entries returning {:?}", req.leader_id, num_entries, result);
+        debug!(
+            "Append request from {} with {} entries returning {:?}",
+            req.leader_id, num_entries, result
+        );
 
         use crate::AppendEntriesError::*;
         match result {
