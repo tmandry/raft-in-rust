@@ -1,10 +1,11 @@
 //! Defines the behavior of the leader.
 
-use crate::protos::raft as protos;
-use crate::protos::raft_grpc;
+use super::protos::raft as protos;
+use super::protos::raft_grpc;
+use super::server::GrpcDriver;
 use crate::server::{RaftServer, RaftState};
-use crate::storage::{self, Storage};
-use crate::{LogIndex, ServerId, Term};
+use crate::storage::Storage;
+use crate::{ApplyError, LogIndex, ServerId, Term};
 
 use futures::future::{self, Future};
 use log::*;
@@ -18,18 +19,11 @@ use std::sync::{
 };
 use timer;
 
-pub(crate) struct LeaderState {
+pub struct LeaderState {
     match_index: BTreeMap<ServerId, LogIndex>,
     apply_responses: BTreeMap<LogIndex, Option<Result<Vec<u8>, ApplyError>>>,
     next_heartbeat: Option<timer::Guard>,
     ticks_since_response: BTreeMap<ServerId, i32>,
-}
-
-#[derive(Debug)]
-pub enum ApplyError {
-    NotLeader,
-    StorageError(storage::Error),
-    TooManyErrors(Vec<Box<dyn Error + Send>>),
 }
 
 #[derive(Debug)]
@@ -52,7 +46,7 @@ type AppendFuture = Box<
         + 'static,
 >;
 
-impl RaftServer {
+impl RaftServer<GrpcDriver> {
     pub(crate) fn become_leader(&mut self) {
         info!("Becoming leader");
 

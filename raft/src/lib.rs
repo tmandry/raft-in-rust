@@ -1,17 +1,15 @@
 #[macro_use]
 mod macros;
 
-mod leader;
-pub(crate) mod protos;
+pub(crate) mod grpc;
 pub mod server;
 pub mod storage;
-
-pub use self::leader::ApplyError;
 
 use crate::storage::Storage;
 use log::*;
 use serde::{de::DeserializeOwned, Serialize};
 use std::cmp::min;
+use std::error::Error;
 use std::fmt::Debug;
 use std::sync::{Arc, RwLock};
 
@@ -22,9 +20,19 @@ pub trait StateMachine: Default + Send + Sync + Debug {
     fn apply(&mut self, command: &Self::Command) -> Self::Response;
 }
 
+pub use server::{Config, Endpoints};
+pub type GrpcRaftServer = server::RaftServer<grpc::server::GrpcDriver>;
+
 type ServerId = i32;
 type Term = i32;
 type LogIndex = i64;
+
+#[derive(Debug)]
+pub enum ApplyError {
+    NotLeader,
+    StorageError(storage::Error),
+    TooManyErrors(Vec<Box<dyn Error + Send>>),
+}
 
 /// The Peer state that is common to all servers in the cluster.
 pub struct Peer {

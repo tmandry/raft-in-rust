@@ -1,5 +1,5 @@
-use raft::server::{Config, RaftServer};
 use raft::storage::MemoryStorage;
+use raft::{Config, GrpcRaftServer};
 
 use futures::Future;
 use log::*;
@@ -60,7 +60,7 @@ fn main() -> std::io::Result<()> {
         .expect("server id must be an integer");
     let config = Config::new(File::open("servers.txt")?, id);
     let storage = MemoryStorage::<sm::TestService>::new();
-    let server = RaftServer::new(storage, config);
+    let server = GrpcRaftServer::new(storage, config);
 
     loop {
         let mut input = String::new();
