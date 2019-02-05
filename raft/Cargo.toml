@@ -18,5 +18,7 @@ rand = "0.6.1"
 chrono = "*"
 tokio = "*"
 
+tarpc = { git = "https://github.com/google/tarpc" }
+
 [build-dependencies]
 protoc-grpcio = "0.3.1"

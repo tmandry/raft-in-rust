@@ -4,6 +4,7 @@ mod macros;
 pub(crate) mod grpc;
 pub mod server;
 pub mod storage;
+pub(crate) mod tarpc;
 
 use crate::storage::Storage;
 use log::*;
