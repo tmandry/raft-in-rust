@@ -1,3 +1,8 @@
+#![feature(async_await)]
+#![feature(await_macro)]
+#![feature(futures_api)]
+#![feature(proc_macro_hygiene)]
+
 #[macro_use]
 mod macros;
 
@@ -8,7 +13,7 @@ pub(crate) mod tarpc;
 
 use crate::storage::Storage;
 use log::*;
-use serde::{de::DeserializeOwned, Serialize};
+use serde::{de::DeserializeOwned, Deserialize, Serialize};
 use std::cmp::min;
 use std::error::Error;
 use std::fmt::Debug;
@@ -23,6 +28,7 @@ pub trait StateMachine: Default + Send + Sync + Debug {
 
 pub use server::{Config, Endpoints};
 pub type GrpcRaftServer = server::RaftServer<grpc::server::GrpcDriver>;
+pub type TarpcRaftServer = server::RaftServer<tarpc::server::TarpcDriver>;
 
 type ServerId = i32;
 type Term = i32;
@@ -54,8 +60,8 @@ pub struct Peer {
 /// Invoked by leader to replicate log entries.
 ///
 /// Also used as heartbeat (with `entries` empty.)
-#[derive(Clone, Debug)]
-pub(crate) struct AppendEntries {
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct AppendEntries {
     term: Term,
     leader_id: ServerId,
     prev_log_index: Option<LogIndex>,
@@ -72,8 +78,8 @@ pub(crate) enum AppendEntriesError {
 }
 
 /// Invoked by candidates seeking election.
-#[derive(Debug)]
-pub(crate) struct VoteRequest {
+#[derive(Debug, Serialize, Deserialize)]
+pub struct VoteRequest {
     term: Term,
     candidate_id: ServerId,
     last_log_index: LogIndex,

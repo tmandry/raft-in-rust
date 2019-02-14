@@ -1,7 +1,8 @@
+use futures_new::prelude::*;
 use raft::storage::MemoryStorage;
-use raft::{Config, GrpcRaftServer};
+use raft::{Config, TarpcRaftServer as MyRaftServer};
 
-use futures::Future;
+//use futures::Future;
 use log::*;
 use serde_json;
 use std::env;
@@ -12,7 +13,7 @@ use std::str;
 mod sm {
     use log::*;
     use raft::StateMachine;
-    use serde_derive::{Deserialize, Serialize};
+    use serde::{Deserialize, Serialize};
 
     #[derive(Debug)]
     pub struct TestService(i64);
@@ -60,7 +61,7 @@ fn main() -> std::io::Result<()> {
         .expect("server id must be an integer");
     let config = Config::new(File::open("servers.txt")?, id);
     let storage = MemoryStorage::<sm::TestService>::new();
-    let server = GrpcRaftServer::new(storage, config);
+    let server = MyRaftServer::new(storage, config);
 
     loop {
         let mut input = String::new();
@@ -68,7 +69,7 @@ fn main() -> std::io::Result<()> {
             Ok(_) => {
                 let mut server = server.lock().unwrap();
                 let command = serde_json::to_vec(&sm::Command::Increment).unwrap();
-                let task = server.apply_one(command).then(|result| {
+                let task = server.apply_one(command).map(|result| {
                     let result = result.map(|reply| str::from_utf8(&reply).unwrap().to_owned());
                     info!("Result after apply: {:?}", result);
                     Ok(())
