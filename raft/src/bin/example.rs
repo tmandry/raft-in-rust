@@ -1,6 +1,6 @@
 //use futures_new::prelude::*;
 use raft::storage::MemoryStorage;
-use raft::{BasicServerBuilder, Config, GrpcRaftServer as MyRaftServer};
+use raft::{BasicServerBuilder, Config, TarpcRaftServer as MyRaftServer};
 
 use log::*;
 use serde_json;

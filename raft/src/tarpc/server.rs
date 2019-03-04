@@ -1,6 +1,6 @@
-use crate::server::{Config, Endpoints};
+use crate::server::{BasicServer, BasicServerBuilder, Config, Endpoints};
 use crate::storage::Storage;
-use crate::{AppendEntries, Peer, ServerId, Term, VoteRequest};
+use crate::{AppendEntries, ApplyError, Peer, ServerId, Term, VoteRequest};
 use chrono::Duration;
 use futures_new::{
     compat::{Compat, TokioDefaultSpawner},
@@ -17,6 +17,8 @@ use tarpc::server::Handler;
 use tarpc::{self, client};
 use timer::{self, Timer};
 use tokio::runtime::Runtime;
+
+pub type TarpcRaftServer = RaftServer<TarpcDriver>;
 
 #[derive(Serialize, Deserialize, Debug)]
 pub struct AppendResponse {
@@ -38,8 +40,6 @@ mod service {
         rpc request_vote(req: VoteRequest) -> VoteResponse;
     }
 }
-
-pub type TarpcRaftServer = RaftServer<TarpcDriver>;
 
 pub trait RpcDriver: Send + 'static
 where
@@ -64,26 +64,29 @@ pub struct RaftServer<R: RpcDriver> {
     pub(crate) scheduled_timeout: Option<timer::Guard>,
 
     /// The configured heartbeat frequency for when this server is the leader.
-    pub(crate) heartbeat_frequency: Duration,
+    //pub(crate) heartbeat_frequency: Duration,
 
     /// Used for scheduling callbacks.
     pub(crate) weak_self: Weak<Mutex<RaftServer<R>>>,
-    pub(crate) runtime: Arc<Mutex<Runtime>>,
-
+    //pub(crate) runtime: Arc<Mutex<Runtime>>,
     pub(crate) state: RaftState<R::LeaderState>,
 }
 
 pub(crate) enum RaftState<L: Send> {
     Follower,
-    Candidate { num_votes: i32 },
+    #[allow(unused)]
+    Candidate {
+        num_votes: i32,
+    },
+    #[allow(unused)]
     Leader(L),
 }
 
-impl<R: RpcDriver> RaftServer<R> {
-    pub fn new(
+impl<R: RpcDriver> BasicServerBuilder for RaftServer<R> {
+    fn new(
         storage: Arc<RwLock<dyn Storage + Send + Sync>>,
         config: Config,
-    ) -> Arc<Mutex<Self>> {
+    ) -> Arc<Mutex<dyn BasicServer>> {
         let mut endpoints = config.endpoints;
         let my_endpoint = endpoints
             .remove(&config.id)
@@ -107,11 +110,9 @@ impl<R: RpcDriver> RaftServer<R> {
             scheduled_timeout: None,
             timeout,
 
-            heartbeat_frequency: Duration::milliseconds(config.heartbeat_frequency_ms),
-
+            //heartbeat_frequency: Duration::milliseconds(config.heartbeat_frequency_ms),
             weak_self: Weak::new(),
-            runtime,
-
+            //runtime,
             state: RaftState::Follower,
         }));
 
@@ -128,6 +129,16 @@ impl<R: RpcDriver> RaftServer<R> {
             })
             .unwrap();
         server
+    }
+}
+
+impl<R: RpcDriver> BasicServer for RaftServer<R> {
+    fn apply_then(
+        &mut self,
+        entry: Vec<u8>,
+        f: Box<dyn Fn(Result<Vec<u8>, ApplyError>) -> () + Send + Sync>,
+    ) {
+        panic!("apply_then unimplemented");
     }
 }
 
@@ -253,17 +264,14 @@ async fn connect_endpoint(endpoint: String) -> io::Result<service::Client> {
     Ok(client)
 }
 
-type ApplyError = ();
+//type ApplyError = ();
 impl RaftServer<TarpcDriver> {
     fn timeout(&mut self) {
         self.reset_timeout();
         warn!("timeout unimplemented");
     }
 
-    pub fn apply_one(
-        &mut self,
-        _entry: Vec<u8>,
-    ) -> impl Future<Output = Result<Vec<u8>, ApplyError>> {
+    pub fn apply_one(&mut self, _entry: Vec<u8>) -> impl Future<Output = Result<Vec<u8>, ()>> {
         future::ready(Ok(vec![]))
     }
 
