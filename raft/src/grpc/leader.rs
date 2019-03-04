@@ -2,7 +2,7 @@
 
 use super::protos::raft as protos;
 use super::protos::raft_grpc;
-use super::server::{GrpcDriver, RaftServer, RaftState};
+use super::server::{RaftServer, RaftState};
 use crate::storage::Storage;
 use crate::{ApplyError, LogIndex, ServerId, Term};
 
@@ -45,7 +45,7 @@ type AppendFuture = Box<
         + 'static,
 >;
 
-impl RaftServer<GrpcDriver> {
+impl RaftServer {
     pub(crate) fn become_leader(&mut self) {
         info!("Becoming leader");
 

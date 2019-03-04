@@ -1,9 +1,9 @@
 use super::leader::LeaderState;
 use super::protos::raft as protos;
 use super::protos::raft_grpc::{self, RaftService, RaftServiceClient};
-use crate::server::{Config, Endpoints};
+use crate::server::{BasicServer, BasicServerBuilder, Config, Endpoints};
 use crate::storage::Storage;
-use crate::{AppendEntries, Peer, ServerId, Term, VoteRequest};
+use crate::{AppendEntries, ApplyError, Peer, ServerId, Term, VoteRequest};
 use chrono::Duration;
 
 use futures::Future;
@@ -16,24 +16,11 @@ use std::sync::{Arc, Mutex, RwLock, Weak};
 use timer::{self, Timer};
 use tokio::runtime::Runtime;
 
-pub type GrpcRaftServer = RaftServer<GrpcDriver>;
+pub type GrpcRaftServer = RaftServer;
 
-pub trait RpcDriver: Send + 'static
-where
-    Self: std::marker::Sized,
-{
-    type LeaderState: Send;
-
-    fn new(id: ServerId, endpoints: Endpoints, runtime: Arc<Mutex<Runtime>>) -> Self;
-    fn connect_all(&mut self);
-    fn create_rpc_server(&mut self, endpoint: String, raft_server: Weak<Mutex<RaftServer<Self>>>);
-    fn timeout(raft_server: &mut RaftServer<Self>);
-}
-
-pub struct RaftServer<R: RpcDriver> {
-    pub rpc: R,
-    pub peer: Peer,
-    pub storage: Arc<RwLock<dyn Storage + Send + Sync>>,
+pub struct RaftServer {
+    pub(crate) rpc: GrpcDriver,
+    pub(crate) peer: Peer,
 
     pub(crate) timer: Timer,
 
@@ -44,23 +31,23 @@ pub struct RaftServer<R: RpcDriver> {
     pub(crate) heartbeat_frequency: Duration,
 
     /// Used for scheduling callbacks.
-    pub(crate) weak_self: Weak<Mutex<RaftServer<R>>>,
+    pub(crate) weak_self: Weak<Mutex<RaftServer>>,
     pub(crate) runtime: Arc<Mutex<Runtime>>,
 
-    pub(crate) state: RaftState<R::LeaderState>,
+    pub(crate) state: RaftState,
 }
 
-pub(crate) enum RaftState<L: Send> {
+pub(crate) enum RaftState {
     Follower,
     Candidate { num_votes: i32 },
-    Leader(L),
+    Leader(LeaderState),
 }
 
-impl<R: RpcDriver> RaftServer<R> {
-    pub fn new(
+impl BasicServerBuilder for RaftServer {
+    fn new(
         storage: Arc<RwLock<dyn Storage + Send + Sync>>,
         config: Config,
-    ) -> Arc<Mutex<Self>> {
+    ) -> Arc<Mutex<dyn BasicServer>> {
         let mut endpoints = config.endpoints;
         let my_endpoint = endpoints
             .remove(&config.id)
@@ -75,9 +62,8 @@ impl<R: RpcDriver> RaftServer<R> {
 
         let runtime = Arc::new(Mutex::new(Runtime::new().unwrap()));
         let server = Arc::new(Mutex::new(RaftServer {
-            rpc: R::new(config.id, endpoints, runtime.clone()),
-            peer: Peer::new(storage.clone()),
-            storage,
+            rpc: GrpcDriver::new(config.id, endpoints, runtime.clone()),
+            peer: Peer::new(storage),
 
             timer: Timer::new(),
 
@@ -108,7 +94,21 @@ impl<R: RpcDriver> RaftServer<R> {
     }
 }
 
-impl<R: RpcDriver> RaftServer<R> {
+impl BasicServer for RaftServer {
+    fn apply_then(
+        &mut self,
+        entry: Vec<u8>,
+        f: Box<dyn Fn(Result<Vec<u8>, ApplyError>) -> () + Send + Sync>,
+    ) {
+        let task = self.apply_one(entry).then(move |result| -> Result<(), ()> {
+            f(result);
+            Ok(())
+        });
+        self.spawn(task);
+    }
+}
+
+impl RaftServer {
     pub(crate) fn reset_timeout(&mut self) {
         if let RaftState::Leader(_) = self.state {
             // It would be silly to schedule timeouts when we're the leader.
@@ -119,13 +119,13 @@ impl<R: RpcDriver> RaftServer<R> {
         let guard = self.timer.schedule_with_delay(self.timeout, move || {
             debug!("delay");
             upgrade_or_return!(weak_self);
-            R::timeout(&mut weak_self);
+            GrpcDriver::timeout(&mut weak_self);
         });
         self.scheduled_timeout = Some(guard);
     }
 }
 
-impl RaftServer<GrpcDriver> {
+impl RaftServer {
     #[allow(unused)]
     pub(crate) fn id(&self) -> ServerId {
         self.rpc.id
@@ -143,7 +143,7 @@ impl RaftServer<GrpcDriver> {
     }
 }
 
-pub struct GrpcDriver {
+pub(crate) struct GrpcDriver {
     id: ServerId,
     endpoints: Endpoints,
     pub(crate) clients: BTreeMap<ServerId, RaftServiceClient>,
@@ -151,9 +151,7 @@ pub struct GrpcDriver {
     pub(crate) server: Option<grpcio::Server>,
 }
 
-impl RpcDriver for GrpcDriver {
-    type LeaderState = LeaderState;
-
+impl GrpcDriver {
     fn new(id: ServerId, endpoints: Endpoints, _runtime: Arc<Mutex<Runtime>>) -> Self {
         let env = Arc::new(EnvBuilder::new().build());
         GrpcDriver {
@@ -171,11 +169,7 @@ impl RpcDriver for GrpcDriver {
         }
     }
 
-    fn create_rpc_server(
-        &mut self,
-        endpoint: String,
-        raft_server: Weak<Mutex<RaftServer<GrpcDriver>>>,
-    ) {
+    fn create_rpc_server(&mut self, endpoint: String, raft_server: Weak<Mutex<RaftServer>>) {
         assert!(self.server.is_none());
         let endpoint: SocketAddr = endpoint.parse().unwrap();
         let service = raft_grpc::create_raft_service(raft_server);
@@ -188,7 +182,7 @@ impl RpcDriver for GrpcDriver {
         self.server = Some(server);
     }
 
-    fn timeout(raft_server: &mut RaftServer<GrpcDriver>) {
+    fn timeout(raft_server: &mut RaftServer) {
         raft_server.timeout();
     }
 }
@@ -209,7 +203,7 @@ impl GrpcDriver {
     }
 }
 
-impl RaftServer<GrpcDriver> {
+impl RaftServer {
     /// Starts an election to become the next leader.
     fn timeout(&mut self) {
         self.state = RaftState::Candidate { num_votes: 1 }; // we're going to vote for ourselves.
@@ -303,7 +297,7 @@ impl RaftServer<GrpcDriver> {
     }
 }
 
-impl RaftService for Weak<Mutex<RaftServer<GrpcDriver>>> {
+impl RaftService for Weak<Mutex<RaftServer>> {
     fn request_vote(
         &mut self,
         ctx: RpcContext,

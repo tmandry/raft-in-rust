@@ -1,8 +1,7 @@
-use futures_new::prelude::*;
+//use futures_new::prelude::*;
 use raft::storage::MemoryStorage;
-use raft::{Config, TarpcRaftServer as MyRaftServer};
+use raft::{BasicServerBuilder, Config, GrpcRaftServer as MyRaftServer};
 
-//use futures::Future;
 use log::*;
 use serde_json;
 use std::env;
@@ -59,9 +58,13 @@ fn main() -> std::io::Result<()> {
         .expect("please supply server id in args")
         .parse::<i32>()
         .expect("server id must be an integer");
+    run::<MyRaftServer>(id)
+}
+
+fn run<Server: BasicServerBuilder>(id: i32) -> std::io::Result<()> {
     let config = Config::new(File::open("servers.txt")?, id);
     let storage = MemoryStorage::<sm::TestService>::new();
-    let server = MyRaftServer::new(storage, config);
+    let server = Server::new(storage, config);
 
     loop {
         let mut input = String::new();
@@ -69,12 +72,13 @@ fn main() -> std::io::Result<()> {
             Ok(_) => {
                 let mut server = server.lock().unwrap();
                 let command = serde_json::to_vec(&sm::Command::Increment).unwrap();
-                let task = server.apply_one(command).map(|result| {
-                    let result = result.map(|reply| str::from_utf8(&reply).unwrap().to_owned());
-                    info!("Result after apply: {:?}", result);
-                    Ok(())
-                });
-                server.spawn(task);
+                server.apply_then(
+                    command,
+                    Box::new(|result| {
+                        let result = result.map(|reply| str::from_utf8(&reply).unwrap().to_owned());
+                        info!("Result after apply: {:?}", result);
+                    }),
+                );
             }
             Err(e) => {
                 warn!("Error while reading from stdin: {:?}", e);

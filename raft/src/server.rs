@@ -1,9 +1,10 @@
-use crate::ServerId;
+use crate::{ApplyError, ServerId, Storage};
 
 use std::collections::BTreeMap;
 use std::env;
 use std::fs::File;
 use std::io::{BufRead, BufReader};
+use std::sync::{Arc, Mutex, RwLock};
 
 pub type Endpoints = BTreeMap<ServerId, String>;
 
@@ -34,4 +35,19 @@ impl Config {
         }
         conf
     }
+}
+
+pub trait BasicServerBuilder {
+    fn new(
+        storage: Arc<RwLock<dyn Storage + Send + Sync>>,
+        config: Config,
+    ) -> Arc<Mutex<dyn BasicServer>>;
+}
+
+pub trait BasicServer {
+    fn apply_then(
+        &mut self,
+        entry: Vec<u8>,
+        f: Box<dyn Fn(Result<Vec<u8>, ApplyError>) -> () + Send + Sync>,
+    );
 }

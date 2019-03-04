@@ -29,7 +29,7 @@ pub trait StateMachine: Default + Send + Sync + Debug {
 pub use self::tarpc::server::TarpcRaftServer;
 pub use grpc::server::GrpcRaftServer;
 
-pub use server::{Config, Endpoints};
+pub use server::{BasicServer, BasicServerBuilder, Config, Endpoints};
 
 type ServerId = i32;
 type Term = i32;
