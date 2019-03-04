@@ -10,6 +10,7 @@ use log::*;
 use std::collections::BTreeMap;
 use std::net::SocketAddr;
 use std::sync::{Arc, Mutex, Weak};
+use tokio::runtime::Runtime;
 
 impl RaftServer<GrpcDriver> {
     #[allow(unused)]
@@ -40,7 +41,7 @@ pub struct GrpcDriver {
 impl RpcDriver for GrpcDriver {
     type LeaderState = LeaderState;
 
-    fn new(id: ServerId, endpoints: Endpoints) -> Self {
+    fn new(id: ServerId, endpoints: Endpoints, _runtime: Arc<Mutex<Runtime>>) -> Self {
         let env = Arc::new(EnvBuilder::new().build());
         GrpcDriver {
             id,

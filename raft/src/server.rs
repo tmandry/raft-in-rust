@@ -49,7 +49,7 @@ where
 {
     type LeaderState: Send;
 
-    fn new(id: ServerId, endpoints: Endpoints) -> Self;
+    fn new(id: ServerId, endpoints: Endpoints, runtime: Arc<Mutex<Runtime>>) -> Self;
     fn connect_all(&mut self);
     fn create_rpc_server(&mut self, endpoint: String, raft_server: Weak<Mutex<RaftServer<Self>>>);
     fn timeout(raft_server: &mut RaftServer<Self>);
@@ -98,8 +98,9 @@ impl<R: RpcDriver> RaftServer<R> {
         });
         info!("Setting timeout to {}", timeout);
 
+        let runtime = Arc::new(Mutex::new(Runtime::new().unwrap()));
         let server = Arc::new(Mutex::new(RaftServer {
-            rpc: R::new(config.id, endpoints),
+            rpc: R::new(config.id, endpoints, runtime.clone()),
             peer: Peer::new(storage.clone()),
             storage,
 
@@ -111,7 +112,7 @@ impl<R: RpcDriver> RaftServer<R> {
             heartbeat_frequency: Duration::milliseconds(config.heartbeat_frequency_ms),
 
             weak_self: Weak::new(),
-            runtime: Arc::new(Mutex::new(Runtime::new().unwrap())),
+            runtime,
 
             state: RaftState::Follower,
         }));
@@ -124,6 +125,7 @@ impl<R: RpcDriver> RaftServer<R> {
                 this.rpc.create_rpc_server(my_endpoint, weak_server.clone());
 
                 this.weak_self = weak_server;
+                debug!("calling reset_timeout");
                 this.reset_timeout();
             })
             .unwrap();
@@ -140,6 +142,7 @@ impl<R: RpcDriver> RaftServer<R> {
 
         let weak_self = self.weak_self.clone();
         let guard = self.timer.schedule_with_delay(self.timeout, move || {
+            debug!("delay");
             upgrade_or_return!(weak_self);
             R::timeout(&mut weak_self);
         });
