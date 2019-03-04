@@ -2,8 +2,7 @@
 
 use super::protos::raft as protos;
 use super::protos::raft_grpc;
-use super::server::GrpcDriver;
-use crate::server::{RaftServer, RaftState};
+use super::server::{GrpcDriver, RaftServer, RaftState};
 use crate::storage::Storage;
 use crate::{ApplyError, LogIndex, ServerId, Term};
 

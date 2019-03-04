@@ -26,9 +26,10 @@ pub trait StateMachine: Default + Send + Sync + Debug {
     fn apply(&mut self, command: &Self::Command) -> Self::Response;
 }
 
+pub use self::tarpc::server::TarpcRaftServer;
+pub use grpc::server::GrpcRaftServer;
+
 pub use server::{Config, Endpoints};
-pub type GrpcRaftServer = server::RaftServer<grpc::server::GrpcDriver>;
-pub type TarpcRaftServer = server::RaftServer<tarpc::server::TarpcDriver>;
 
 type ServerId = i32;
 type Term = i32;
