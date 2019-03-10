@@ -16,7 +16,6 @@ use std::sync::{Arc, Mutex, RwLock, Weak};
 use tarpc::server::Handler;
 use tarpc::{self, client};
 use timer::{self, Timer};
-use tokio::runtime::Runtime;
 
 pub type TarpcRaftServer = RaftServer;
 
@@ -87,9 +86,8 @@ impl BasicServerBuilder for RaftServer {
         });
         info!("Setting timeout to {}", timeout);
 
-        let runtime = Arc::new(Mutex::new(Runtime::new().unwrap()));
         let server = Arc::new(Mutex::new(RaftServer {
-            rpc: TarpcDriver::new(config.id, endpoints, runtime.clone()),
+            rpc: TarpcDriver::new(config.id, endpoints),
             peer: Peer::new(storage.clone()),
             storage,
 
@@ -104,20 +102,33 @@ impl BasicServerBuilder for RaftServer {
             state: RaftState::Follower,
         }));
 
-        server
+        let task = server
             .lock()
             .map(|mut this| {
-                this.rpc.connect_all();
                 let weak_server = Arc::downgrade(&server);
-                this.rpc.create_rpc_server(my_endpoint, weak_server.clone());
-
-                this.weak_self = weak_server;
-                debug!("calling reset_timeout");
-                this.reset_timeout();
+                this.weak_self = weak_server.clone();
+                run(my_endpoint, weak_server).boxed()
             })
             .unwrap();
+
+        std::thread::spawn(move || {
+            let task = Compat::new(task.map(|()| Ok(())));
+            tokio::run(task);
+        });
+
         server
     }
+}
+
+async fn run(my_endpoint: String, weak_server: Weak<Mutex<RaftServer>>) {
+    let this = weak_server.clone();
+    let task = {
+        upgrade_or_return!(this);
+        this.rpc.connect_all();
+        this.reset_timeout();
+        this.rpc.create_rpc_server(my_endpoint, weak_server)
+    };
+    await!(task);
 }
 
 impl BasicServer for RaftServer {
@@ -174,19 +185,17 @@ pub struct TarpcDriver {
     //rpc_server: Option<tarpc::server::Server>,
     endpoints: Endpoints,
     clients: BTreeMap<ServerId, service::Client>,
-    runtime: Arc<Mutex<Runtime>>,
 }
 
 type LeaderState = ();
 
 #[allow(unused)]
 impl TarpcDriver {
-    fn new(id: ServerId, endpoints: Endpoints, runtime: Arc<Mutex<Runtime>>) -> Self {
+    fn new(id: ServerId, endpoints: Endpoints) -> Self {
         tarpc::init(TokioDefaultSpawner);
         TarpcDriver {
             endpoints,
             clients: Default::default(),
-            runtime,
         }
     }
 
@@ -212,33 +221,28 @@ impl TarpcDriver {
             dbg!(results);
             Ok(())
         });
-        run_on_current_thread(task);
+        tokio::spawn(Compat::new(task));
 
         debug!("Finished connect_all");
         std::mem::swap(&mut self.clients, &mut *clients.lock().unwrap());
     }
 
-    fn create_rpc_server(&mut self, endpoint: String, raft_server: Weak<Mutex<RaftServer>>) {
-        debug!("create_rpc_server");
-        self.runtime.lock().unwrap().spawn(
-            run(endpoint, raft_server)
-                .map_err(|e| error!("Error while running server: {}", e))
-                .boxed()
-                .compat(),
-        );
-        debug!("create_rpc_server finished");
+    fn create_rpc_server<'a>(
+        &self,
+        endpoint: String,
+        raft_server: Weak<Mutex<RaftServer>>,
+    ) -> impl Future<Output = ()> {
+        let raft_server: Arc<Mutex<RaftServer>> = raft_server.upgrade().expect("asdf");
+        let transport =
+            bincode_transport::listen(&endpoint.parse().unwrap()).expect("could not listen");
+        tarpc::server::new(tarpc::server::Config::default())
+            .incoming(transport)
+            .respond_with(service::serve(raft_server))
     }
 
     fn timeout(raft_server: &mut RaftServer) {
         raft_server.timeout();
     }
-}
-
-fn run_on_current_thread(task: impl TryFuture<Ok = (), Error = ()> + Unpin + 'static) {
-    let mut runtime = tokio::runtime::current_thread::Runtime::new().unwrap();
-    runtime.spawn(Compat::new(task));
-    runtime.run().unwrap();
-    //runtime.block_on(Compat::new(task));
 }
 
 async fn connect_endpoint(endpoint: String) -> io::Result<service::Client> {
@@ -269,17 +273,4 @@ impl RaftServer {
     {
         tokio::run(Compat::new(f));
     }
-}
-
-async fn run(endpoint: String, raft_server: Weak<Mutex<RaftServer>>) -> io::Result<()> {
-    let raft_server: Arc<Mutex<RaftServer>> = raft_server.upgrade().expect("asdf");
-    let transport =
-        bincode_transport::listen(&endpoint.parse().unwrap()).expect("could not listen");
-    let server = tarpc::server::new(tarpc::server::Config::default())
-        .incoming(transport)
-        .respond_with(service::serve(raft_server));
-
-    await!(server);
-
-    Ok(())
 }
