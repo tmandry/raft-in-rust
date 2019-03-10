@@ -18,7 +18,7 @@ use tarpc::{self, client};
 use timer::{self, Timer};
 use tokio::runtime::Runtime;
 
-pub type TarpcRaftServer = RaftServer<TarpcDriver>;
+pub type TarpcRaftServer = RaftServer;
 
 #[derive(Serialize, Deserialize, Debug)]
 pub struct AppendResponse {
@@ -41,20 +41,8 @@ mod service {
     }
 }
 
-pub trait RpcDriver: Send + 'static
-where
-    Self: std::marker::Sized,
-{
-    type LeaderState: Send;
-
-    fn new(id: ServerId, endpoints: Endpoints, runtime: Arc<Mutex<Runtime>>) -> Self;
-    fn connect_all(&mut self);
-    fn create_rpc_server(&mut self, endpoint: String, raft_server: Weak<Mutex<RaftServer<Self>>>);
-    fn timeout(raft_server: &mut RaftServer<Self>);
-}
-
-pub struct RaftServer<R: RpcDriver> {
-    pub rpc: R,
+pub struct RaftServer {
+    pub rpc: TarpcDriver,
     pub peer: Peer,
     pub storage: Arc<RwLock<dyn Storage + Send + Sync>>,
 
@@ -67,9 +55,9 @@ pub struct RaftServer<R: RpcDriver> {
     //pub(crate) heartbeat_frequency: Duration,
 
     /// Used for scheduling callbacks.
-    pub(crate) weak_self: Weak<Mutex<RaftServer<R>>>,
+    pub(crate) weak_self: Weak<Mutex<RaftServer>>,
     //pub(crate) runtime: Arc<Mutex<Runtime>>,
-    pub(crate) state: RaftState<R::LeaderState>,
+    pub(crate) state: RaftState<LeaderState>,
 }
 
 pub(crate) enum RaftState<L: Send> {
@@ -82,7 +70,7 @@ pub(crate) enum RaftState<L: Send> {
     Leader(L),
 }
 
-impl<R: RpcDriver> BasicServerBuilder for RaftServer<R> {
+impl BasicServerBuilder for RaftServer {
     fn new(
         storage: Arc<RwLock<dyn Storage + Send + Sync>>,
         config: Config,
@@ -101,7 +89,7 @@ impl<R: RpcDriver> BasicServerBuilder for RaftServer<R> {
 
         let runtime = Arc::new(Mutex::new(Runtime::new().unwrap()));
         let server = Arc::new(Mutex::new(RaftServer {
-            rpc: R::new(config.id, endpoints, runtime.clone()),
+            rpc: TarpcDriver::new(config.id, endpoints, runtime.clone()),
             peer: Peer::new(storage.clone()),
             storage,
 
@@ -132,7 +120,7 @@ impl<R: RpcDriver> BasicServerBuilder for RaftServer<R> {
     }
 }
 
-impl<R: RpcDriver> BasicServer for RaftServer<R> {
+impl BasicServer for RaftServer {
     fn apply_then(
         &mut self,
         entry: Vec<u8>,
@@ -142,7 +130,7 @@ impl<R: RpcDriver> BasicServer for RaftServer<R> {
     }
 }
 
-impl<R: RpcDriver> RaftServer<R> {
+impl RaftServer {
     pub(crate) fn reset_timeout(&mut self) {
         if let RaftState::Leader(_) = self.state {
             // It would be silly to schedule timeouts when we're the leader.
@@ -153,12 +141,12 @@ impl<R: RpcDriver> RaftServer<R> {
         let guard = self.timer.schedule_with_delay(self.timeout, move || {
             debug!("delay");
             upgrade_or_return!(weak_self);
-            R::timeout(&mut weak_self);
+            TarpcDriver::timeout(&mut weak_self);
         });
         self.scheduled_timeout = Some(guard);
     }
 }
-impl service::Service for Arc<Mutex<RaftServer<TarpcDriver>>> {
+impl service::Service for Arc<Mutex<RaftServer>> {
     type AppendEntriesFut = Ready<AppendResponse>;
 
     fn append_entries(
@@ -189,10 +177,10 @@ pub struct TarpcDriver {
     runtime: Arc<Mutex<Runtime>>,
 }
 
-#[allow(unused)]
-impl RpcDriver for TarpcDriver {
-    type LeaderState = ();
+type LeaderState = ();
 
+#[allow(unused)]
+impl TarpcDriver {
     fn new(id: ServerId, endpoints: Endpoints, runtime: Arc<Mutex<Runtime>>) -> Self {
         tarpc::init(TokioDefaultSpawner);
         TarpcDriver {
@@ -230,7 +218,7 @@ impl RpcDriver for TarpcDriver {
         std::mem::swap(&mut self.clients, &mut *clients.lock().unwrap());
     }
 
-    fn create_rpc_server(&mut self, endpoint: String, raft_server: Weak<Mutex<RaftServer<Self>>>) {
+    fn create_rpc_server(&mut self, endpoint: String, raft_server: Weak<Mutex<RaftServer>>) {
         debug!("create_rpc_server");
         self.runtime.lock().unwrap().spawn(
             run(endpoint, raft_server)
@@ -241,7 +229,7 @@ impl RpcDriver for TarpcDriver {
         debug!("create_rpc_server finished");
     }
 
-    fn timeout(raft_server: &mut RaftServer<Self>) {
+    fn timeout(raft_server: &mut RaftServer) {
         raft_server.timeout();
     }
 }
@@ -265,7 +253,7 @@ async fn connect_endpoint(endpoint: String) -> io::Result<service::Client> {
 }
 
 //type ApplyError = ();
-impl RaftServer<TarpcDriver> {
+impl RaftServer {
     fn timeout(&mut self) {
         self.reset_timeout();
         warn!("timeout unimplemented");
@@ -283,11 +271,8 @@ impl RaftServer<TarpcDriver> {
     }
 }
 
-async fn run(
-    endpoint: String,
-    raft_server: Weak<Mutex<RaftServer<TarpcDriver>>>,
-) -> io::Result<()> {
-    let raft_server: Arc<Mutex<RaftServer<TarpcDriver>>> = raft_server.upgrade().expect("asdf");
+async fn run(endpoint: String, raft_server: Weak<Mutex<RaftServer>>) -> io::Result<()> {
+    let raft_server: Arc<Mutex<RaftServer>> = raft_server.upgrade().expect("asdf");
     let transport =
         bincode_transport::listen(&endpoint.parse().unwrap()).expect("could not listen");
     let server = tarpc::server::new(tarpc::server::Config::default())
