@@ -79,7 +79,7 @@ pub(crate) enum AppendEntriesError {
 }
 
 /// Invoked by candidates seeking election.
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct VoteRequest {
     term: Term,
     candidate_id: ServerId,

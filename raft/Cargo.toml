@@ -19,6 +19,7 @@ rand = "0.6.1"
 chrono = "*"
 tokio = "*"
 tokio-executor = "0.1"
+tokio-timer = "0.2.10"
 
 tarpc = { git = "https://github.com/google/tarpc", features = ["serde1"] }
 

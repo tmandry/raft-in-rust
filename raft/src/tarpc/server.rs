@@ -1,9 +1,8 @@
 use crate::server::{BasicServer, BasicServerBuilder, Config, Endpoints};
 use crate::storage::Storage;
 use crate::{AppendEntries, ApplyError, Peer, ServerId, Term, VoteRequest};
-use chrono::Duration;
 use futures_new::{
-    compat::{Compat, TokioDefaultSpawner},
+    compat::{Compat, TokioDefaultSpawner, Future01CompatExt},
     future::{self, Ready},
     prelude::*,
 };
@@ -14,8 +13,9 @@ use std::collections::BTreeMap;
 use std::io;
 use std::sync::{Arc, Mutex, RwLock, Weak};
 use tarpc::server::Handler;
-use tarpc::{self, client};
-use timer::{self, Timer};
+use tarpc::{self, client, context};
+use std::time::{Duration, Instant};
+use tokio::timer::Delay;
 
 pub type TarpcRaftServer = RaftServer;
 
@@ -41,14 +41,13 @@ mod service {
 }
 
 pub struct RaftServer {
+    pub(crate) id: ServerId,
+
     pub rpc: TarpcDriver,
     pub peer: Peer,
     pub storage: Arc<RwLock<dyn Storage + Send + Sync>>,
 
-    pub(crate) timer: Timer,
-
     timeout: Duration,
-    pub(crate) scheduled_timeout: Option<timer::Guard>,
 
     /// The configured heartbeat frequency for when this server is the leader.
     //pub(crate) heartbeat_frequency: Duration,
@@ -79,26 +78,24 @@ impl BasicServerBuilder for RaftServer {
             .remove(&config.id)
             .expect("no server endpoint configured for my id!");
 
-        let timeout = Duration::milliseconds(if config.min_timeout_ms == config.max_timeout_ms {
-            config.min_timeout_ms
+        let timeout = Duration::from_millis(if config.min_timeout_ms == config.max_timeout_ms {
+            config.min_timeout_ms as u64
         } else {
-            rand::thread_rng().gen_range(config.min_timeout_ms, config.max_timeout_ms)
+            rand::thread_rng().gen_range(config.min_timeout_ms, config.max_timeout_ms) as u64
         });
-        info!("Setting timeout to {}", timeout);
+        info!("Setting timeout to {:?}", timeout);
 
         let server = Arc::new(Mutex::new(RaftServer {
+            id: config.id,
+
             rpc: TarpcDriver::new(config.id, endpoints),
             peer: Peer::new(storage.clone()),
             storage,
 
-            timer: Timer::new(),
-
-            scheduled_timeout: None,
             timeout,
 
             //heartbeat_frequency: Duration::milliseconds(config.heartbeat_frequency_ms),
             weak_self: Weak::new(),
-            //runtime,
             state: RaftState::Follower,
         }));
 
@@ -124,7 +121,7 @@ async fn run(my_endpoint: String, weak_server: Weak<Mutex<RaftServer>>) {
     let this = weak_server.clone();
     let task = {
         upgrade_or_return!(this);
-        this.rpc.connect_all();
+        this.rpc.connect_all(weak_server.clone());
         this.reset_timeout();
         this.rpc.create_rpc_server(my_endpoint, weak_server)
     };
@@ -134,8 +131,8 @@ async fn run(my_endpoint: String, weak_server: Weak<Mutex<RaftServer>>) {
 impl BasicServer for RaftServer {
     fn apply_then(
         &mut self,
-        entry: Vec<u8>,
-        f: Box<dyn Fn(Result<Vec<u8>, ApplyError>) -> () + Send + Sync>,
+        _entry: Vec<u8>,
+        _f: Box<dyn Fn(Result<Vec<u8>, ApplyError>) -> () + Send + Sync>,
     ) {
         panic!("apply_then unimplemented");
     }
@@ -149,12 +146,19 @@ impl RaftServer {
         }
 
         let weak_self = self.weak_self.clone();
-        let guard = self.timer.schedule_with_delay(self.timeout, move || {
-            debug!("delay");
-            upgrade_or_return!(weak_self);
-            TarpcDriver::timeout(&mut weak_self);
-        });
-        self.scheduled_timeout = Some(guard);
+        let when = Instant::now() + self.timeout;
+        let task = Delay::new(when)
+            .compat()
+            .map(move |d| {
+                if let Err(e) = d {
+                    panic!("delay errored; err={:?}", e);
+                }
+                debug!("delay");
+                upgrade_or_return!(weak_self, Ok(()));
+                TarpcDriver::timeout(&mut weak_self);
+                Ok(())
+            });
+        tokio::spawn(Compat::new(task));
     }
 }
 impl service::Service for Arc<Mutex<RaftServer>> {
@@ -199,7 +203,7 @@ impl TarpcDriver {
         }
     }
 
-    fn connect_all(&mut self) {
+    fn connect_all(&mut self, weak_server: Weak<Mutex<RaftServer>>) {
         let mut clients = Arc::new(Mutex::new(BTreeMap::new()));
 
         let all = self
@@ -217,14 +221,14 @@ impl TarpcDriver {
                     Err(e) => error!("Error connecting to client {}: {}", id, e),
                 })
             });
-        let task = future::join_all(all).map(|results| {
-            dbg!(results);
+        let task = future::join_all(all).map(move |results| {
+            upgrade_or_return!(weak_server, Ok(()));
+            let this = &mut weak_server.rpc;
+            std::mem::swap(&mut this.clients, &mut *clients.lock().unwrap());
+            debug!("Finished connect_all; clients={}", this.clients.len());
             Ok(())
         });
         tokio::spawn(Compat::new(task));
-
-        debug!("Finished connect_all");
-        std::mem::swap(&mut self.clients, &mut *clients.lock().unwrap());
     }
 
     fn create_rpc_server<'a>(
@@ -260,7 +264,35 @@ async fn connect_endpoint(endpoint: String) -> io::Result<service::Client> {
 impl RaftServer {
     fn timeout(&mut self) {
         self.reset_timeout();
-        warn!("timeout unimplemented");
+        warn!("timeout");
+
+        // Vote for ourselves.
+        self.state = RaftState::Candidate { num_votes: 1 };
+        self.peer.voted_for = Some(self.id);
+        self.peer.current_term += 1;
+
+        let (last_log_index, last_log_term) =
+            self.peer.storage.read().map(|s| (s.last_log_index(), s.last_log_term())).unwrap();
+
+        let req = VoteRequest {
+            term: self.peer.term(),
+            candidate_id: self.id,
+            last_log_index,
+            last_log_term
+        };
+
+        for (id, client) in &self.rpc.clients {
+            let req = req.clone();
+            let mut client = client.clone();
+            let id = *id;
+            debug!("spawning vote request to {}", id);
+            tokio::spawn(Compat::new(async move {
+                debug!("Sending vote request to {}", id);
+                let resp = await!(client.request_vote(context::current(), req));
+                debug!("Vote response: {:#?}", resp);
+                Ok(())
+            }.boxed()));
+        }
     }
 
     pub fn apply_one(&mut self, _entry: Vec<u8>) -> impl Future<Output = Result<Vec<u8>, ()>> {
@@ -272,5 +304,10 @@ impl RaftServer {
         F: Future<Output = Result<(), ()>> + Send + Unpin + 'static,
     {
         tokio::run(Compat::new(f));
+    }
+
+    #[allow(unused)]
+    pub(crate) fn majority(&self) -> i32 {
+        (self.rpc.clients.len() as i32 + 2) / 2
     }
 }
